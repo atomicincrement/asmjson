@@ -234,21 +234,25 @@ pub fn parse_json<'a>(src: &'a str) -> Option<Value<'a>> {
                 }
             },
 
-            State::AtomChars => match byte {
-                b if b <= b' ' || matches!(b, b',' | b'}' | b']') => {
-                    push_value(parse_atom(&src[atom_start..pos + chunk_offset]), &mut frames, &mut result);
-                    match byte {
-                        b'}' => { close_frame(b'}', &mut frames, &mut result); State::AfterValue }
-                        b']' => { close_frame(b']', &mut frames, &mut result); State::AfterValue }
-                        b',' => match frames.last() {
-                            Some(Frame::Arr { .. }) => State::ArrayStart,
-                            Some(Frame::Obj { .. }) => State::ObjectStart,
-                            None                    => State::AfterValue,
-                        },
-                        _ => State::AfterValue, // whitespace delimiter
-                    }
+            State::AtomChars => {
+                // Skip non-delimiter bytes in bulk: delimiters has bits set at
+                // whitespace, ',', '}' and ']'.
+                let ahead = byte_state.delimiters >> chunk_offset;
+                let skip = ahead.trailing_zeros() as usize;
+                chunk_offset += skip;
+                if chunk_offset >= chunk_len { break 'inner; }
+                let byte = chunk[chunk_offset];
+                push_value(parse_atom(&src[atom_start..pos + chunk_offset]), &mut frames, &mut result);
+                match byte {
+                    b'}' => { close_frame(b'}', &mut frames, &mut result); State::AfterValue }
+                    b']' => { close_frame(b']', &mut frames, &mut result); State::AfterValue }
+                    b',' => match frames.last() {
+                        Some(Frame::Arr { .. }) => State::ArrayStart,
+                        Some(Frame::Obj { .. }) => State::ObjectStart,
+                        None                    => State::AfterValue,
+                    },
+                    _ => State::AfterValue, // whitespace delimiter
                 }
-                _ => State::AtomChars,
             },
 
             State::ObjectStart => {
@@ -328,21 +332,28 @@ struct ByteState {
     whitespace:  u64, // bit n set => byte n is whitespace (<= 0x20)
     quotes:      u64, // bit n set => byte n is '"'
     backslashes: u64, // bit n set => byte n is '\\'
+    delimiters:  u64, // bit n set => byte n ends an atom (whitespace | ',' | '}' | ']')
 }
 
 /// Pre-built 64-byte needle vectors for AVX-512 comparisons.
 struct ByteStateConstants {
-    space:     [u8; 64],
-    quote:     [u8; 64],
-    backslash: [u8; 64],
+    space:          [u8; 64],
+    quote:          [u8; 64],
+    backslash:      [u8; 64],
+    comma:          [u8; 64],
+    close_brace:    [u8; 64],
+    close_bracket:  [u8; 64],
 }
 
 impl ByteStateConstants {
     fn new() -> Self {
         Self {
-            space:     [b' ';  64],
-            quote:     [b'"'; 64],
-            backslash: [b'\\'; 64],
+            space:         [b' ';  64],
+            quote:         [b'"'; 64],
+            backslash:     [b'\\'; 64],
+            comma:         [b',';  64],
+            close_brace:   [b'}';  64],
+            close_bracket: [b']';  64],
         }
     }
 }
@@ -357,6 +368,7 @@ fn next_state(src: &[u8], constants: &ByteStateConstants) -> ByteState {
     let whitespace: u64;
     let quotes: u64;
     let backslashes: u64;
+    let delimiters: u64;
     unsafe {
         std::arch::asm!(
             // Masked byte load: only load src.len() bytes, zero the rest.
@@ -371,20 +383,35 @@ fn next_state(src: &[u8], constants: &ByteStateConstants) -> ByteState {
             // Backslash positions.
             "vpcmpeqb k1, zmm0, zmmword ptr [{n_backslash}]",
             "kmovq {backslashes}, k1",
-            src         = in(reg)  src.as_ptr(),
-            n_space     = in(reg)  constants.space.as_ptr(),
-            n_quote     = in(reg)  constants.quote.as_ptr(),
-            n_backslash = in(reg)  constants.backslash.as_ptr(),
-            load_mask   = in(reg)  load_mask,
-            whitespace  = out(reg) whitespace,
-            quotes      = out(reg) quotes,
-            backslashes = out(reg) backslashes,
+            // Atom delimiters: comma | } | ] accumulated in GP registers.
+            "vpcmpeqb k1, zmm0, zmmword ptr [{n_comma}]",
+            "kmovq {delimiters}, k1",
+            "vpcmpeqb k1, zmm0, zmmword ptr [{n_close_brace}]",
+            "kmovq {tmp}, k1",
+            "or {delimiters}, {tmp}",
+            "vpcmpeqb k1, zmm0, zmmword ptr [{n_close_bracket}]",
+            "kmovq {tmp}, k1",
+            "or {delimiters}, {tmp}",
+            "or {delimiters}, {whitespace}",
+            src            = in(reg)  src.as_ptr(),
+            n_space        = in(reg)  constants.space.as_ptr(),
+            n_quote        = in(reg)  constants.quote.as_ptr(),
+            n_backslash    = in(reg)  constants.backslash.as_ptr(),
+            n_comma        = in(reg)  constants.comma.as_ptr(),
+            n_close_brace  = in(reg)  constants.close_brace.as_ptr(),
+            n_close_bracket= in(reg)  constants.close_bracket.as_ptr(),
+            load_mask      = in(reg)  load_mask,
+            whitespace     = out(reg) whitespace,
+            quotes         = out(reg) quotes,
+            backslashes    = out(reg) backslashes,
+            delimiters     = out(reg) delimiters,
+            tmp            = out(reg) _,
             out("zmm0") _,
             out("k1")   _,
             options(nostack, readonly),
         );
     }
-    ByteState { whitespace, quotes, backslashes }
+    ByteState { whitespace, quotes, backslashes, delimiters }
 }
 
 
