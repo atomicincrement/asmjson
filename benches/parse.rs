@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use asmjson::parse_json;
 #[cfg(feature = "stats")]
 use asmjson::stats;
@@ -135,11 +135,21 @@ fn bench_string_array(c: &mut Criterion) {
     #[cfg(feature = "stats")] print_stats("string_array", &data);
     let mut group = c.benchmark_group("string_array");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("parse", |b| {
+    group.bench_function("asmjson", |b| {
         b.iter(|| {
             let v = parse_json(&data);
             std::hint::black_box(v);
         });
+    });
+    group.bench_with_input(BenchmarkId::new("simd-json", "borrowed"), &data.as_bytes().to_vec(), |b, input| {
+        b.iter_batched(
+            || input.clone(),
+            |mut buf| {
+                drop(simd_json::to_borrowed_value(&mut buf).unwrap());
+                std::hint::black_box(buf)
+            },
+            criterion::BatchSize::LargeInput,
+        );
     });
     group.finish();
 }
@@ -149,11 +159,21 @@ fn bench_string_object(c: &mut Criterion) {
     #[cfg(feature = "stats")] print_stats("string_object", &data);
     let mut group = c.benchmark_group("string_object");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("parse", |b| {
+    group.bench_function("asmjson", |b| {
         b.iter(|| {
             let v = parse_json(&data);
             std::hint::black_box(v);
         });
+    });
+    group.bench_with_input(BenchmarkId::new("simd-json", "borrowed"), &data.as_bytes().to_vec(), |b, input| {
+        b.iter_batched(
+            || input.clone(),
+            |mut buf| {
+                drop(simd_json::to_borrowed_value(&mut buf).unwrap());
+                std::hint::black_box(buf)
+            },
+            criterion::BatchSize::LargeInput,
+        );
     });
     group.finish();
 }
@@ -163,11 +183,22 @@ fn bench_mixed(c: &mut Criterion) {
     #[cfg(feature = "stats")] print_stats("mixed", &data);
     let mut group = c.benchmark_group("mixed");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("parse", |b| {
+    group.bench_function("asmjson", |b| {
         b.iter(|| {
             let v = parse_json(&data);
             std::hint::black_box(v);
         });
+    });
+    let bytes = data.as_bytes().to_vec();
+    group.bench_with_input(BenchmarkId::new("simd-json", "borrowed"), &bytes, |b, input| {
+        b.iter_batched(
+            || input.clone(),
+            |mut buf| {
+                drop(simd_json::to_borrowed_value(&mut buf).unwrap());
+                std::hint::black_box(buf)
+            },
+            criterion::BatchSize::LargeInput,
+        );
     });
     group.finish();
 }
