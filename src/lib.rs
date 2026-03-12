@@ -197,22 +197,34 @@ fn parse_json(src: &str) -> Option<Value> {
                 }
             },
             State::KeyEscape => { buf.push(byte as char); State::KeyChars }
-            State::KeyEnd => match byte {
-                b if b <= b' ' => State::KeyEnd,
-                b':' => {
-                    if let Some(Frame::Obj { key, .. }) = frames.last_mut() {
-                        *key = std::mem::take(&mut buf);
+            State::KeyEnd => {
+                let ahead = (!byte_state.whitespace) >> chunk_offset;
+                let skip = ahead.trailing_zeros() as usize;
+                chunk_offset += skip;
+                if chunk_offset >= chunk_len { break 'inner; }
+                let byte = chunk[chunk_offset];
+                match byte {
+                    b':' => {
+                        if let Some(Frame::Obj { key, .. }) = frames.last_mut() {
+                            *key = std::mem::take(&mut buf);
+                        }
+                        State::AfterColon
                     }
-                    State::AfterColon
+                    _ => State::KeyEnd,
                 }
-                _ => State::KeyEnd,
             },
-            State::AfterColon => match byte {
-                b if b <= b' ' => State::AfterColon,
-                b'{' => { frames.push(Frame::Obj { key: String::new(), members: Vec::new() }); State::ObjectStart }
-                b'[' => { frames.push(Frame::Arr { elements: Vec::new() }); State::ArrayStart }
-                b'"' => { buf.clear(); State::StringChars }
-                _    => { buf.clear(); buf.push(byte as char); State::AtomChars }
+            State::AfterColon => {
+                let ahead = (!byte_state.whitespace) >> chunk_offset;
+                let skip = ahead.trailing_zeros() as usize;
+                chunk_offset += skip;
+                if chunk_offset >= chunk_len { break 'inner; }
+                let byte = chunk[chunk_offset];
+                match byte {
+                    b'{' => { frames.push(Frame::Obj { key: String::new(), members: Vec::new() }); State::ObjectStart }
+                    b'[' => { frames.push(Frame::Arr { elements: Vec::new() }); State::ArrayStart }
+                    b'"' => { buf.clear(); State::StringChars }
+                    _    => { buf.clear(); buf.push(byte as char); State::AtomChars }
+                }
             },
 
             State::AtomChars => match byte {
@@ -233,44 +245,62 @@ fn parse_json(src: &str) -> Option<Value> {
                 _ => { buf.push(byte as char); State::AtomChars }
             },
 
-            State::ObjectStart => match byte {
-                b if b <= b' ' => State::ObjectStart,
-                b'"' => { buf.clear(); State::KeyChars }
-                b'}' => {
-                    close_frame(b'}', &mut frames, &mut result);
-                    State::AfterValue
+            State::ObjectStart => {
+                let ahead = (!byte_state.whitespace) >> chunk_offset;
+                let skip = ahead.trailing_zeros() as usize;
+                chunk_offset += skip;
+                if chunk_offset >= chunk_len { break 'inner; }
+                let byte = chunk[chunk_offset];
+                match byte {
+                    b'"' => { buf.clear(); State::KeyChars }
+                    b'}' => {
+                        close_frame(b'}', &mut frames, &mut result);
+                        State::AfterValue
+                    }
+                    _ => State::ObjectStart,
                 }
-                _ => State::ObjectStart,
             },
 
-            State::ArrayStart => match byte {
-                b if b <= b' ' => State::ArrayStart,
-                b']' => {
-                    close_frame(b']', &mut frames, &mut result);
-                    State::AfterValue
+            State::ArrayStart => {
+                let ahead = (!byte_state.whitespace) >> chunk_offset;
+                let skip = ahead.trailing_zeros() as usize;
+                chunk_offset += skip;
+                if chunk_offset >= chunk_len { break 'inner; }
+                let byte = chunk[chunk_offset];
+                match byte {
+                    b']' => {
+                        close_frame(b']', &mut frames, &mut result);
+                        State::AfterValue
+                    }
+                    b'{' => { frames.push(Frame::Obj { key: String::new(), members: Vec::new() }); State::ObjectStart }
+                    b'[' => { frames.push(Frame::Arr { elements: Vec::new() }); State::ArrayStart }
+                    b'"' => { buf.clear(); State::StringChars }
+                    _    => { buf.clear(); buf.push(byte as char); State::AtomChars }
                 }
-                b'{' => { frames.push(Frame::Obj { key: String::new(), members: Vec::new() }); State::ObjectStart }
-                b'[' => { frames.push(Frame::Arr { elements: Vec::new() }); State::ArrayStart }
-                b'"' => { buf.clear(); State::StringChars }
-                _    => { buf.clear(); buf.push(byte as char); State::AtomChars }
             },
 
-            State::AfterValue => match byte {
-                b if b <= b' ' => State::AfterValue,
-                b',' => match frames.last() {
-                    Some(Frame::Obj { .. }) => State::ObjectStart,
-                    Some(Frame::Arr { .. }) => State::ArrayStart,
-                    None                    => State::AfterValue,
-                },
-                b'}' => {
-                    close_frame(b'}', &mut frames, &mut result);
-                    State::AfterValue
+            State::AfterValue => {
+                let ahead = (!byte_state.whitespace) >> chunk_offset;
+                let skip = ahead.trailing_zeros() as usize;
+                chunk_offset += skip;
+                if chunk_offset >= chunk_len { break 'inner; }
+                let byte = chunk[chunk_offset];
+                match byte {
+                    b',' => match frames.last() {
+                        Some(Frame::Obj { .. }) => State::ObjectStart,
+                        Some(Frame::Arr { .. }) => State::ArrayStart,
+                        None                    => State::AfterValue,
+                    },
+                    b'}' => {
+                        close_frame(b'}', &mut frames, &mut result);
+                        State::AfterValue
+                    }
+                    b']' => {
+                        close_frame(b']', &mut frames, &mut result);
+                        State::AfterValue
+                    }
+                    _ => State::AfterValue,
                 }
-                b']' => {
-                    close_frame(b']', &mut frames, &mut result);
-                    State::AfterValue
-                }
-                _ => State::AfterValue,
             },
             };
             chunk_offset += 1;
