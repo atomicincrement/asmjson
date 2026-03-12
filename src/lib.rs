@@ -74,7 +74,7 @@ enum State {
 #[derive(PartialEq, Debug, Clone)]
 pub enum Value<'a> {
     String(&'a str),
-    Number(f64),
+    Number(&'a str),
     Bool(bool),
     Null,
     Object(Vec<(&'a str, Value<'a>)>),
@@ -96,7 +96,7 @@ pub fn parse_json<'a>(src: &'a str) -> Option<Value<'a>> {
             "true"  => Value::Bool(true),
             "false" => Value::Bool(false),
             "null"  => Value::Null,
-            n       => Value::Number(n.parse().unwrap_or(0.0)),
+            n       => Value::Number(n),
         }
     }
 
@@ -423,7 +423,7 @@ mod tests {
     }
 
     fn s(v: &'static str) -> Value<'static> { Value::String(v) }
-    fn n(v: f64) -> Value<'static> { Value::Number(v) }
+    fn n(v: &'static str) -> Value<'static> { Value::Number(v) }
     fn obj(members: &[(&'static str, Value<'static>)]) -> Value<'static> {
         Value::Object(members.iter().map(|(k, v)| (*k, v.clone())).collect())
     }
@@ -444,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_number() {
-        assert_eq!(run("42"), Some(n(42.0)));
+        assert_eq!(run("42"), Some(n("42")));
     }
 
     #[test]
@@ -478,7 +478,7 @@ mod tests {
             run(r#"{ "key1" : "value1" , "key2": [123, 456, 768], "key3" : { "nested_key" : true } }"#),
             Some(obj(&[
                 ("key1", s("value1")),
-                ("key2", arr(vec![n(123.0), n(456.0), n(768.0)])),
+                ("key2", arr(vec![n("123"), n("456"), n("768")])),
                 ("key3", obj(&[("nested_key", Value::Bool(true))])),
             ]))
         );
@@ -489,17 +489,17 @@ mod tests {
         assert_eq!(
             run(r#"[1, "two", true, null, {"x": 3}]"#),
             Some(arr(vec![
-                n(1.0),
+                n("1"),
                 s("two"),
                 Value::Bool(true),
                 Value::Null,
-                obj(&[("x", n(3.0))]),
+                obj(&[("x", n("3"))]),
             ]))
         );
     }
 
     #[test]
     fn test_whitespace() {
-        assert_eq!(run("  \n  42  \n"), Some(n(42.0)));
+        assert_eq!(run("  \n  42  \n"), Some(n("42")));
     }
 }
