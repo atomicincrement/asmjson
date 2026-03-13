@@ -187,6 +187,9 @@ fn bench_string_array(c: &mut Criterion) {
             );
         },
     );
+    group.bench_function("serde_json", |b| {
+        b.iter(|| std::hint::black_box(serde_json::from_str::<serde_json::Value>(&data).unwrap()));
+    });
     group.finish();
 }
 
@@ -222,6 +225,9 @@ fn bench_string_object(c: &mut Criterion) {
             );
         },
     );
+    group.bench_function("serde_json", |b| {
+        b.iter(|| std::hint::black_box(serde_json::from_str::<serde_json::Value>(&data).unwrap()));
+    });
     group.finish();
 }
 
@@ -258,6 +264,9 @@ fn bench_mixed(c: &mut Criterion) {
             );
         },
     );
+    group.bench_function("serde_json", |b| {
+        b.iter(|| std::hint::black_box(serde_json::from_str::<serde_json::Value>(&data).unwrap()));
+    });
     group.finish();
 }
 

@@ -34,6 +34,7 @@ name = "asmjson"
 version = "0.1.2"
 dependencies = [
  "criterion",
+ "serde_json",
  "simd-json",
 ]
 
