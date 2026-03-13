@@ -1,6 +1,6 @@
 [package]
 name = "asmjson"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A fast JSON parser using AVX-512/AVX2/SWAR classifiers"
 authors = ["Amy Thomason"]
