@@ -443,3 +443,44 @@ and `TapeRef`, missing-key short-circuit, mixed `.get().index_at().get()`.
 ```
 413c41f  feat: impl JsonRef for Option<J> with type Item for flat chaining
 ```
+
+## Session 8 — Submodule split: `value`, `tape`, `json_ref`
+
+### What was done
+
+Split the monolithic `src/lib.rs` into three submodules:
+
+| Module | File | Contents |
+|---|---|---|
+| `value` | `src/value.rs` | `Value<'a>`, `ValueWriter`, `is_valid_json_number`, `push_value`, `Frame` |
+| `tape` | `src/tape.rs` | `TapeEntry`, `Tape`, `TapeWriter`, `TapeRef`, `tape_skip`, `Tape::root` |
+| `json_ref` | `src/json_ref.rs` | `JsonRef` trait + impls for `&'a Value`, `TapeRef`, `Option<J>` |
+
+Each module carries its own `#[cfg(test)] mod tests { … }` block with the
+tests relevant to that module.  `lib.rs` retains only the parse engine
+(classifier functions, `parse_json_impl`, `JsonWriter`, `FrameKind`,
+`write_atom`) plus a single `classifier_agreement` test.
+
+Public API is unchanged: `lib.rs` re-exports all moved types via
+`pub use value::Value`, `pub use tape::{Tape, TapeEntry, TapeRef}`, and
+`pub use json_ref::JsonRef`.
+
+### Design decisions
+
+- `ValueWriter` and `TapeWriter` are `pub(crate)` so `lib.rs` can pass them to
+  `parse_with`; their constructors are also `pub(crate)`.
+- `is_valid_json_number` is `pub(crate)` so `lib.rs`'s `write_atom` can call it.
+- `TapeRef`'s fields (`tape`, `pos`) are `pub(crate)` so `json_ref.rs` can
+  implement the `JsonRef` accessor methods without the impl living in `tape.rs`.
+- `tape_skip` is `pub(crate)` for the same reason.
+- Each submodule's test helpers (`run`, `run_tape`, `run_both`) are duplicated
+  locally; they are private and small enough that sharing is unnecessary.
+
+### Results
+
+30/30 tests pass across all four test modules; zero warnings after removing
+three unused imports that surfaced during the move.
+
+### Commit
+
+`4781b13` refactor: split into submodules value, tape, json_ref
