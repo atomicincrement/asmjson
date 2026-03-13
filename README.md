@@ -47,38 +47,14 @@ Use `choose_classifier` to select automatically at runtime.
 Measured on a single core with `cargo bench` against 10 MiB of synthetic JSON.
 Comparison points are `simd-json` (borrowed output, AVX2) and `serde_json`.
 
-### String array — array of short JSON strings
-
-| Parser              | Throughput  |
-|---------------------|-------------|
-| asmjson zmm (tape)  | 8.44 GiB/s  |
-| asmjson zmm         | 6.06 GiB/s  |
-| asmjson u64         | 5.86 GiB/s  |
-| asmjson ymm         | 5.49 GiB/s  |
-| serde_json          | 2.51 GiB/s  |
-| simd-json borrowed  | 2.14 GiB/s  |
-
-### String object — object with many short string values
-
-| Parser              | Throughput  |
-|---------------------|-------------|
-| asmjson zmm (tape)  | 5.64 GiB/s  |
-| asmjson zmm         | 5.23 GiB/s  |
-| asmjson ymm         | 4.43 GiB/s  |
-| asmjson u64         | 4.21 GiB/s  |
-| simd-json borrowed  | 1.33 GiB/s  |
-| serde_json          | 0.59 GiB/s  |
-
-### Mixed — realistic nested JSON with numbers, booleans and strings
-
-| Parser              | Throughput   |
-|---------------------|--------------|
-| asmjson zmm (tape)  | 397.5 MiB/s  |
-| asmjson zmm         | 265.3 MiB/s  |
-| asmjson ymm         | 265.1 MiB/s  |
-| asmjson u64         | 261.3 MiB/s  |
-| simd-json borrowed  | 183.1 MiB/s  |
-| serde_json          |  95.5 MiB/s  |
+| Parser              | string array | string object | mixed        |
+|---------------------|:------------:|:-------------:|:------------:|
+| asmjson zmm (tape)  | 8.44 GiB/s   | 5.64 GiB/s    | 397.5 MiB/s  |
+| asmjson zmm         | 6.06 GiB/s   | 5.23 GiB/s    | 265.3 MiB/s  |
+| asmjson u64         | 5.86 GiB/s   | 4.21 GiB/s    | 261.3 MiB/s  |
+| asmjson ymm         | 5.49 GiB/s   | 4.43 GiB/s    | 265.1 MiB/s  |
+| serde_json          | 2.51 GiB/s   | 0.59 GiB/s    |  95.5 MiB/s  |
+| simd-json borrowed  | 2.14 GiB/s   | 1.33 GiB/s    | 183.1 MiB/s  |
 
 The tape output is consistently the fastest because it skips object/array
 construction entirely.  The portable `u64` SWAR classifier matches or beats
