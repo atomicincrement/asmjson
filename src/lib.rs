@@ -1010,6 +1010,85 @@ pub fn classify_zmm(src: &[u8]) -> ByteState {
     }
 }
 
+// ---------------------------------------------------------------------------
+// U64 (portable SWAR) — 8 × u64 words, no SIMD
+// ---------------------------------------------------------------------------
+
+/// Classify up to 64 bytes purely in software using SWAR
+/// (SIMD Within A Register) bit-manipulation on eight `u64` words.
+///
+/// Three tricks are used:
+///
+/// * **Whitespace (`byte ≤ 0x20`)**: mask off the high bit with `v & 0x7f…`,
+///   then add `0x5f` per byte.  The sum overflows into bit 7 exactly when the
+///   original byte is ≥ 0x21; OR-ing back the original high bit excludes
+///   bytes ≥ 0x80 (not whitespace).  Invert and mask to get the flag.
+///
+/// * **Byte equality**: XOR the word with a broadcast of the target byte
+///   (`b * 0x0101_0101_0101_0101`), then test for a zero byte via
+///   `(v − 0x0101…) & ∼v & 0x8080…`.
+///
+/// * **Movemask**: collect the MSB of each byte into the low 8 bits by
+///   multiplying `(v & 0x8080…)` by `0x0002_0408_1020_4081` and taking the
+///   top byte (shift right 56).
+pub fn classify_u64(src: &[u8]) -> ByteState {
+    assert!(!src.is_empty() && src.len() <= 64);
+    let mut buf = [0u8; 64];
+    buf[..src.len()].copy_from_slice(src);
+
+    #[inline(always)]
+    fn has_zero_byte(v: u64) -> u64 {
+        v.wrapping_sub(0x0101_0101_0101_0101_u64) & !v & 0x8080_8080_8080_8080_u64
+    }
+
+    /// Produce a u64 with bit 7 of each byte set where that byte equals `b`.
+    #[inline(always)]
+    fn eq_byte(v: u64, b: u8) -> u64 {
+        has_zero_byte(v ^ (b as u64 * 0x0101_0101_0101_0101_u64))
+    }
+
+    /// Collect the MSB of each byte into the low 8 bits.
+    #[inline(always)]
+    fn movemask8(v: u64) -> u8 {
+        ((v & 0x8080_8080_8080_8080_u64).wrapping_mul(0x0002_0408_1020_4081_u64) >> 56) as u8
+    }
+
+    let mut ws = [0u8; 8];
+    let mut q = [0u8; 8];
+    let mut bs = [0u8; 8];
+    let mut dl = [0u8; 8];
+
+    for i in 0..8 {
+        let v = u64::from_le_bytes(buf[i * 8..][..8].try_into().unwrap());
+
+        // Whitespace: byte ≤ 0x20.
+        // (v & 0x7f…) + 0x5f… overflows into bit 7 iff byte ≥ 0x21 (low-7 range);
+        // OR-ing the original v excludes bytes ≥ 0x80.
+        let masked = v & 0x7f7f_7f7f_7f7f_7f7f_u64;
+        let sum = masked.wrapping_add(0x5f5f_5f5f_5f5f_5f5f_u64);
+        let w = !(sum | v) & 0x8080_8080_8080_8080_u64;
+
+        let quotes = eq_byte(v, b'"');
+        let backslashes = eq_byte(v, b'\\');
+        let commas = eq_byte(v, b',');
+        let cl_brace = eq_byte(v, b'}');
+        let cl_bracket = eq_byte(v, b']');
+        let delims = w | commas | cl_brace | cl_bracket;
+
+        ws[i] = movemask8(w);
+        q[i] = movemask8(quotes);
+        bs[i] = movemask8(backslashes);
+        dl[i] = movemask8(delims);
+    }
+
+    ByteState {
+        whitespace: u64::from_le_bytes(ws),
+        quotes: u64::from_le_bytes(q),
+        backslashes: u64::from_le_bytes(bs),
+        delimiters: u64::from_le_bytes(dl),
+    }
+}
+
 /// Choose the best available classifier for the current CPU using CPUID.
 ///
 /// Call this once at program start (or use it to initialise a `static`) and
@@ -1020,7 +1099,7 @@ pub fn classify_zmm(src: &[u8]) -> ByteState {
 /// let value = parse_json(json, classify);
 /// ```
 ///
-/// The precedence is: AVX-512BW → AVX2 → SSE2 (always available on x86-64).
+/// The precedence is: AVX-512BW → AVX2 → SSE2 (x86-64) → portable SWAR u64.
 pub fn choose_classifier() -> ClassifyFn {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1030,8 +1109,10 @@ pub fn choose_classifier() -> ClassifyFn {
         if std::is_x86_feature_detected!("avx2") {
             return classify_ymm;
         }
+        return classify_xmm;
     }
-    classify_xmm
+    #[allow(unreachable_code)]
+    classify_u64
 }
 
 #[cfg(test)]
@@ -1073,6 +1154,7 @@ mod tests {
             let zmm = classify_zmm(src);
             let xmm = classify_xmm(src);
             let ymm = classify_ymm(src);
+            let u64 = classify_u64(src);
 
             assert_eq!(
                 xmm, zmm,
@@ -1083,6 +1165,11 @@ mod tests {
                 ymm, zmm,
                 "YMM vs ZMM mismatch on input {:?}\n  ymm ws={:#018x} zmm ws={:#018x}",
                 input, ymm.whitespace, zmm.whitespace
+            );
+            assert_eq!(
+                u64, zmm,
+                "U64 vs ZMM mismatch on input {:?}\n  u64 ws={:#018x} zmm ws={:#018x}",
+                input, u64.whitespace, zmm.whitespace
             );
         }
     }

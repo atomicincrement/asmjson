@@ -2,7 +2,7 @@
 use asmjson::choose_classifier;
 #[cfg(feature = "stats")]
 use asmjson::stats;
-use asmjson::{classify_xmm, classify_ymm, classify_zmm, parse_json, parse_to_tape};
+use asmjson::{classify_u64, classify_xmm, classify_ymm, classify_zmm, parse_json, parse_to_tape};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 // ---------------------------------------------------------------------------
@@ -173,6 +173,9 @@ fn bench_string_array(c: &mut Criterion) {
     group.bench_function("asmjson/zmm/tape", |b| {
         b.iter(|| std::hint::black_box(parse_to_tape(&data, classify_zmm)));
     });
+    group.bench_function("asmjson/u64", |b| {
+        b.iter(|| std::hint::black_box(parse_json(&data, classify_u64)));
+    });
     group.bench_with_input(
         BenchmarkId::new("simd-json", "borrowed"),
         &data.as_bytes().to_vec(),
@@ -208,6 +211,9 @@ fn bench_string_object(c: &mut Criterion) {
     group.bench_function("asmjson/zmm/tape", |b| {
         b.iter(|| std::hint::black_box(parse_to_tape(&data, classify_zmm)));
     });
+    group.bench_function("asmjson/u64", |b| {
+        b.iter(|| std::hint::black_box(parse_json(&data, classify_u64)));
+    });
     group.bench_with_input(
         BenchmarkId::new("simd-json", "borrowed"),
         &data.as_bytes().to_vec(),
@@ -242,6 +248,9 @@ fn bench_mixed(c: &mut Criterion) {
     });
     group.bench_function("asmjson/zmm/tape", |b| {
         b.iter(|| std::hint::black_box(parse_to_tape(&data, classify_zmm)));
+    });
+    group.bench_function("asmjson/u64", |b| {
+        b.iter(|| std::hint::black_box(parse_json(&data, classify_u64)));
     });
     let bytes = data.as_bytes().to_vec();
     group.bench_with_input(
