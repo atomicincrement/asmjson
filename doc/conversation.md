@@ -764,3 +764,25 @@ was migrated to `lib.rs` rather than deleted; it remains private.
 **Commit**
 
 `cbb1e6b` Remove Value type and parse_json; tape is the only output format
+
+## Session 18 — Benchmark refresh (March 2026)
+
+### Results
+
+Re-ran `cargo bench` with `RUSTFLAGS="-C target-cpu=native"`.  asmjson now
+leads sonic-rs on all three workloads:
+
+| Parser             | string array | string object | mixed      |
+|--------------------|:------------:|:-------------:|:----------:|
+| asmjson zmm (tape) | 8.20 GiB/s   | 5.48 GiB/s    | 370 MiB/s  |
+| sonic-rs           | 7.37 GiB/s   | 4.21 GiB/s    | 368 MiB/s  |
+
+### Design decisions
+
+README table and accompanying prose updated to reflect the new leader, and
+stale references to simd-json, serde_json, and the removed asmjson Value
+variants were removed.
+
+### Commit
+
+`63d6957` bench: update README with March 2026 results (asmjson leads sonic-rs)
