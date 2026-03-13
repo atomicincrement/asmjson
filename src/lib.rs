@@ -176,24 +176,6 @@ enum Frame<'a> {
     },
 }
 
-// Parse a completed atom string into the right Value variant.
-// Returns None if the string is not a valid JSON keyword or number.
-#[inline(never)]
-fn parse_atom<'a>(s: &'a str) -> Option<Value<'a>> {
-    match s {
-        "true" => Some(Value::Bool(true)),
-        "false" => Some(Value::Bool(false)),
-        "null" => Some(Value::Null),
-        n => {
-            if is_valid_json_number(n.as_bytes()) {
-                Some(Value::Number(n))
-            } else {
-                None
-            }
-        }
-    }
-}
-
 // Validate that `s` is a well-formed JSON number:
 //   number = [ "-" ] ( "0" | [1-9][0-9]* ) [ "." [0-9]+ ] [ ("e"|"E") ["+"|"-"] [0-9]+ ]
 #[inline(never)]
@@ -262,56 +244,318 @@ fn push_value<'a>(val: Value<'a>, frames: &mut Vec<Frame<'a>>, result: &mut Opti
     }
 }
 
-// Close the top frame with `}` or `]` and push the resulting Value.
-// Returns true on success, false if the frame stack is empty or the
-// closing bracket does not match the top frame type.
-#[inline(never)]
-fn close_frame<'a>(byte: u8, frames: &mut Vec<Frame<'a>>, result: &mut Option<Value<'a>>) -> bool {
-    match byte {
-        b'}' => {
-            match frames.pop() {
-                Some(Frame::Obj { members, .. }) => {
-                    push_value(Value::Object(members.into_boxed_slice()), frames, result);
-                    true
-                }
-                Some(other) => {
-                    frames.push(other);
-                    false
-                } // mismatch — put it back
-                None => false,
-            }
+// ---------------------------------------------------------------------------
+// Lightweight frame kind — the parser only needs to know Object vs Array for
+// routing commas and validating bracket matches.  Value construction lives in
+// the writer implementations below.
+// ---------------------------------------------------------------------------
+
+enum FrameKind {
+    Object,
+    Array,
+}
+
+// ---------------------------------------------------------------------------
+// JsonWriter trait — SAX-style event sink
+// ---------------------------------------------------------------------------
+
+/// Receives a stream of structural events as the parser walks the input.
+///
+/// Implement this trait to produce any output from a single pass over the JSON
+/// source.  Two built-in implementations are provided:
+///
+/// * [`ValueWriter`] — produces a nested [`Value`] tree (used by [`parse_json`]).
+/// * [`TapeWriter`] — produces a flat [`Tape`] (used by [`parse_to_tape`]).
+///
+/// A custom writer can use [`parse_with`] to drive the parse.
+pub trait JsonWriter<'src> {
+    /// The type returned by [`finish`](JsonWriter::finish).
+    type Output;
+
+    /// A `null` literal was parsed.
+    fn null(&mut self);
+    /// A `true` or `false` literal was parsed.
+    fn bool_val(&mut self, v: bool);
+    /// A JSON number; `s` is a slice of the original source string.
+    fn number(&mut self, s: &'src str);
+    /// A JSON string value (borrowed when escape-free, owned otherwise).
+    fn string(&mut self, s: Cow<'src, str>);
+    /// An object key; always immediately followed by the key's value events.
+    fn key(&mut self, s: Cow<'src, str>);
+    /// Opening `{` of an object.
+    fn start_object(&mut self);
+    /// Closing `}` of an object.
+    fn end_object(&mut self);
+    /// Opening `[` of an array.
+    fn start_array(&mut self);
+    /// Closing `]` of an array.
+    fn end_array(&mut self);
+    /// Called once after the last token; returns the final output or `None` on
+    /// internal error.
+    fn finish(self) -> Option<Self::Output>;
+}
+
+// ---------------------------------------------------------------------------
+// ValueWriter — builds the nested Value tree
+// ---------------------------------------------------------------------------
+
+struct ValueWriter<'a> {
+    frames: Vec<Frame<'a>>,
+    result: Option<Value<'a>>,
+}
+
+impl<'a> ValueWriter<'a> {
+    fn new() -> Self {
+        Self {
+            frames: Vec::new(),
+            result: None,
         }
-        b']' => {
-            match frames.pop() {
-                Some(Frame::Arr { elements }) => {
-                    push_value(Value::Array(elements.into_boxed_slice()), frames, result);
-                    true
-                }
-                Some(other) => {
-                    frames.push(other);
-                    false
-                } // mismatch — put it back
-                None => false,
-            }
-        }
-        _ => false,
     }
 }
 
-pub fn parse_json<'a>(src: &'a str, classify: ClassifyFn) -> Option<Value<'a>> {
-    parse_json_impl(src, classify)
+impl<'a> JsonWriter<'a> for ValueWriter<'a> {
+    type Output = Value<'a>;
+
+    fn null(&mut self) {
+        push_value(Value::Null, &mut self.frames, &mut self.result);
+    }
+    fn bool_val(&mut self, v: bool) {
+        push_value(Value::Bool(v), &mut self.frames, &mut self.result);
+    }
+    fn number(&mut self, s: &'a str) {
+        push_value(Value::Number(s), &mut self.frames, &mut self.result);
+    }
+    fn string(&mut self, s: Cow<'a, str>) {
+        push_value(Value::String(s), &mut self.frames, &mut self.result);
+    }
+    fn key(&mut self, s: Cow<'a, str>) {
+        if let Some(Frame::Obj { key, .. }) = self.frames.last_mut() {
+            *key = s;
+        }
+    }
+    fn start_object(&mut self) {
+        self.frames.push(Frame::Obj {
+            key: Cow::Borrowed(""),
+            members: Vec::new(),
+        });
+    }
+    fn end_object(&mut self) {
+        if let Some(Frame::Obj { members, .. }) = self.frames.pop() {
+            push_value(
+                Value::Object(members.into_boxed_slice()),
+                &mut self.frames,
+                &mut self.result,
+            );
+        }
+    }
+    fn start_array(&mut self) {
+        self.frames.push(Frame::Arr {
+            elements: Vec::new(),
+        });
+    }
+    fn end_array(&mut self) {
+        if let Some(Frame::Arr { elements }) = self.frames.pop() {
+            push_value(
+                Value::Array(elements.into_boxed_slice()),
+                &mut self.frames,
+                &mut self.result,
+            );
+        }
+    }
+    fn finish(self) -> Option<Value<'a>> {
+        if self.frames.is_empty() {
+            self.result
+        } else {
+            None
+        }
+    }
 }
 
-fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> Option<Value<'a>> {
+// ---------------------------------------------------------------------------
+// Tape types — flat, O(1)-skip representation
+// ---------------------------------------------------------------------------
+
+/// A single token in a [`Tape`].
+///
+/// `StartObject(n)` and `StartArray(n)` carry the **index** of their matching
+/// `EndObject` / `EndArray` entry, so an entire object or array can be skipped
+/// in O(1) without recursion.
+#[derive(Debug, PartialEq, Clone)]
+pub enum TapeEntry<'a> {
+    Null,
+    Bool(bool),
+    /// A number token; the slice borrows directly from the source string.
+    Number(&'a str),
+    /// A string value; borrowed when no escapes were present, owned otherwise.
+    String(Cow<'a, str>),
+    /// An object key; always immediately followed by the key's value entry/entries.
+    Key(Cow<'a, str>),
+    /// Start of an object; payload is the index of the matching [`TapeEntry::EndObject`].
+    StartObject(usize),
+    EndObject,
+    /// Start of an array; payload is the index of the matching [`TapeEntry::EndArray`].
+    StartArray(usize),
+    EndArray,
+}
+
+/// A flat sequence of [`TapeEntry`] tokens produced by [`parse_to_tape`].
+///
+/// Each `StartObject(n)` / `StartArray(n)` carries the index of its matching
+/// closer, enabling O(1) structural skips:
+///
+/// ```ignore
+/// if let TapeEntry::StartObject(end) = tape.entries[i] {
+///     i = end + 1; // jump past the entire object
+/// }
+/// ```
+#[derive(Debug)]
+pub struct Tape<'a> {
+    pub entries: Vec<TapeEntry<'a>>,
+}
+
+// ---------------------------------------------------------------------------
+// TapeWriter — builds the flat Tape
+// ---------------------------------------------------------------------------
+
+struct TapeWriter<'a> {
+    entries: Vec<TapeEntry<'a>>,
+    /// Indices of unmatched `StartObject` / `StartArray` waiting for backfill.
+    open: Vec<usize>,
+}
+
+impl<'a> TapeWriter<'a> {
+    fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+            open: Vec::new(),
+        }
+    }
+}
+
+impl<'a> JsonWriter<'a> for TapeWriter<'a> {
+    type Output = Tape<'a>;
+
+    fn null(&mut self) {
+        self.entries.push(TapeEntry::Null);
+    }
+    fn bool_val(&mut self, v: bool) {
+        self.entries.push(TapeEntry::Bool(v));
+    }
+    fn number(&mut self, s: &'a str) {
+        self.entries.push(TapeEntry::Number(s));
+    }
+    fn string(&mut self, s: Cow<'a, str>) {
+        self.entries.push(TapeEntry::String(s));
+    }
+    fn key(&mut self, s: Cow<'a, str>) {
+        self.entries.push(TapeEntry::Key(s));
+    }
+    fn start_object(&mut self) {
+        let idx = self.entries.len();
+        self.open.push(idx);
+        self.entries.push(TapeEntry::StartObject(0)); // backfilled in end_object
+    }
+    fn end_object(&mut self) {
+        let end_idx = self.entries.len();
+        self.entries.push(TapeEntry::EndObject);
+        if let Some(start_idx) = self.open.pop() {
+            self.entries[start_idx] = TapeEntry::StartObject(end_idx);
+        }
+    }
+    fn start_array(&mut self) {
+        let idx = self.entries.len();
+        self.open.push(idx);
+        self.entries.push(TapeEntry::StartArray(0)); // backfilled in end_array
+    }
+    fn end_array(&mut self) {
+        let end_idx = self.entries.len();
+        self.entries.push(TapeEntry::EndArray);
+        if let Some(start_idx) = self.open.pop() {
+            self.entries[start_idx] = TapeEntry::StartArray(end_idx);
+        }
+    }
+    fn finish(self) -> Option<Tape<'a>> {
+        if self.open.is_empty() {
+            Some(Tape {
+                entries: self.entries,
+            })
+        } else {
+            None
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Atom helper — writes a number / bool / null through any JsonWriter
+// ---------------------------------------------------------------------------
+
+fn write_atom<'a, W: JsonWriter<'a>>(s: &'a str, w: &mut W) -> bool {
+    match s {
+        "true" => {
+            w.bool_val(true);
+            true
+        }
+        "false" => {
+            w.bool_val(false);
+            true
+        }
+        "null" => {
+            w.null();
+            true
+        }
+        n => {
+            if is_valid_json_number(n.as_bytes()) {
+                w.number(n);
+                true
+            } else {
+                false
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public parse entry points
+// ---------------------------------------------------------------------------
+
+/// Parse `src` into a [`Value`] tree using the given classifier.
+///
+/// This is a convenience wrapper around [`parse_with`] that uses the built-in
+/// [`ValueWriter`].
+pub fn parse_json<'a>(src: &'a str, classify: ClassifyFn) -> Option<Value<'a>> {
+    parse_with(src, classify, ValueWriter::new())
+}
+
+/// Parse `src` into a flat [`Tape`] using the given classifier.
+pub fn parse_to_tape<'a>(src: &'a str, classify: ClassifyFn) -> Option<Tape<'a>> {
+    parse_with(src, classify, TapeWriter::new())
+}
+
+/// Parse `src` using a custom [`JsonWriter`], returning its output.
+///
+/// This is the generic entry point: supply your own writer to produce any
+/// output in a single pass over the source.
+pub fn parse_with<'a, W: JsonWriter<'a>>(
+    src: &'a str,
+    classify: ClassifyFn,
+    writer: W,
+) -> Option<W::Output> {
+    parse_json_impl(src, classify, writer)
+}
+
+fn parse_json_impl<'a, F, W>(src: &'a str, classify: F, mut writer: W) -> Option<W::Output>
+where
+    F: Fn(&[u8]) -> ByteState,
+    W: JsonWriter<'a>,
+{
     let bytes = src.as_bytes();
-    let mut frames: Vec<Frame> = Vec::new();
+    let mut frames: Vec<FrameKind> = Vec::new();
     let mut str_start: usize = 0; // absolute byte offset of char after opening '"'
     let mut str_escaped = false; // true if the current string contained a backslash escape
     let mut atom_start: usize = 0; // absolute byte offset of first atom byte
     let mut current_key: Cow<'a, str> = Cow::Borrowed(""); // key slice captured when KeyChars closes
     let mut after_comma = false; // true when ObjectStart/ArrayStart was reached via a `,`
     let mut state = State::ValueWhitespace;
-    let mut result: Option<Value> = None;
 
     let mut pos = 0;
     while pos < bytes.len() {
@@ -324,11 +568,8 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
             state = match state {
                 State::ValueWhitespace => {
                     stat!(crate::stats::VALUE_WHITESPACE);
-                    // Compute the distance to the first non-whitespace byte in
-                    // the remaining chunk using a single trailing-zeros count,
-                    // skipping the whole run in one operation.
                     let ahead = (!byte_state.whitespace) >> chunk_offset;
-                    let skip = ahead.trailing_zeros() as usize; // 64 when all whitespace
+                    let skip = ahead.trailing_zeros() as usize;
                     chunk_offset += skip;
                     if chunk_offset >= chunk_len {
                         break 'inner;
@@ -336,16 +577,13 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
                     let byte = chunk[chunk_offset];
                     match byte {
                         b'{' => {
-                            frames.push(Frame::Obj {
-                                key: Cow::Borrowed(""),
-                                members: Vec::new(),
-                            });
+                            frames.push(FrameKind::Object);
+                            writer.start_object();
                             State::ObjectStart
                         }
                         b'[' => {
-                            frames.push(Frame::Arr {
-                                elements: Vec::new(),
-                            });
+                            frames.push(FrameKind::Array);
+                            writer.start_array();
                             State::ArrayStart
                         }
                         b'"' => {
@@ -362,12 +600,6 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
 
                 State::StringChars => {
                     stat!(crate::stats::STRING_CHARS);
-                    // Quotes preceded by a backslash are escaped and do not end
-                    // the string.  Mask them out; then find the first interesting
-                    // byte (unescaped quote or backslash) with trailing_zeros.
-                    // Note: a backslash at chunk byte 63 that escapes a quote at
-                    // byte 0 of the next chunk is handled correctly by the
-                    // per-byte fallback on that next chunk.
                     let unescaped_quotes = byte_state.quotes & !(byte_state.backslashes << 1);
                     let interesting = (byte_state.backslashes | unescaped_quotes) >> chunk_offset;
                     let skip = interesting.trailing_zeros() as usize;
@@ -385,7 +617,7 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
                             } else {
                                 Cow::Borrowed(raw)
                             };
-                            push_value(Value::String(cow), &mut frames, &mut result);
+                            writer.string(cow);
                             State::AfterValue
                         }
                         _ => State::StringChars,
@@ -437,9 +669,7 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
                     let byte = chunk[chunk_offset];
                     match byte {
                         b':' => {
-                            if let Some(Frame::Obj { key, .. }) = frames.last_mut() {
-                                *key = std::mem::replace(&mut current_key, Cow::Borrowed(""));
-                            }
+                            writer.key(std::mem::replace(&mut current_key, Cow::Borrowed("")));
                             State::AfterColon
                         }
                         _ => State::Error,
@@ -456,16 +686,13 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
                     let byte = chunk[chunk_offset];
                     match byte {
                         b'{' => {
-                            frames.push(Frame::Obj {
-                                key: Cow::Borrowed(""),
-                                members: Vec::new(),
-                            });
+                            frames.push(FrameKind::Object);
+                            writer.start_object();
                             State::ObjectStart
                         }
                         b'[' => {
-                            frames.push(Frame::Arr {
-                                elements: Vec::new(),
-                            });
+                            frames.push(FrameKind::Array);
+                            writer.start_array();
                             State::ArrayStart
                         }
                         b'"' => {
@@ -482,8 +709,6 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
 
                 State::AtomChars => {
                     stat!(crate::stats::ATOM_CHARS);
-                    // Skip non-delimiter bytes in bulk: delimiters has bits set at
-                    // whitespace, ',', '}' and ']'.
                     let ahead = byte_state.delimiters >> chunk_offset;
                     let skip = ahead.trailing_zeros() as usize;
                     chunk_offset += skip;
@@ -491,38 +716,36 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
                         break 'inner;
                     }
                     let byte = chunk[chunk_offset];
-                    match parse_atom(&src[atom_start..pos + chunk_offset]) {
-                        None => State::Error,
-                        Some(val) => {
-                            push_value(val, &mut frames, &mut result);
-                            match byte {
-                                b'}' => {
-                                    if close_frame(b'}', &mut frames, &mut result) {
-                                        State::AfterValue
-                                    } else {
-                                        State::Error
-                                    }
+                    if !write_atom(&src[atom_start..pos + chunk_offset], &mut writer) {
+                        State::Error
+                    } else {
+                        match byte {
+                            b'}' => match frames.pop() {
+                                Some(FrameKind::Object) => {
+                                    writer.end_object();
+                                    State::AfterValue
                                 }
-                                b']' => {
-                                    if close_frame(b']', &mut frames, &mut result) {
-                                        State::AfterValue
-                                    } else {
-                                        State::Error
-                                    }
+                                _ => State::Error,
+                            },
+                            b']' => match frames.pop() {
+                                Some(FrameKind::Array) => {
+                                    writer.end_array();
+                                    State::AfterValue
                                 }
-                                b',' => match frames.last() {
-                                    Some(Frame::Arr { .. }) => {
-                                        after_comma = true;
-                                        State::ArrayStart
-                                    }
-                                    Some(Frame::Obj { .. }) => {
-                                        after_comma = true;
-                                        State::ObjectStart
-                                    }
-                                    None => State::Error,
-                                },
-                                _ => State::AfterValue, // whitespace delimiter
-                            }
+                                _ => State::Error,
+                            },
+                            b',' => match frames.last() {
+                                Some(FrameKind::Array) => {
+                                    after_comma = true;
+                                    State::ArrayStart
+                                }
+                                Some(FrameKind::Object) => {
+                                    after_comma = true;
+                                    State::ObjectStart
+                                }
+                                None => State::Error,
+                            },
+                            _ => State::AfterValue, // whitespace delimiter
                         }
                     }
                 }
@@ -548,10 +771,14 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
                         b'}' => {
                             if after_comma {
                                 State::Error
-                            } else if close_frame(b'}', &mut frames, &mut result) {
-                                State::AfterValue
                             } else {
-                                State::Error
+                                match frames.pop() {
+                                    Some(FrameKind::Object) => {
+                                        writer.end_object();
+                                        State::AfterValue
+                                    }
+                                    _ => State::Error,
+                                }
                             }
                         }
                         _ => State::Error,
@@ -571,25 +798,26 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
                         b']' => {
                             if after_comma {
                                 State::Error
-                            } else if close_frame(b']', &mut frames, &mut result) {
-                                State::AfterValue
                             } else {
-                                State::Error
+                                match frames.pop() {
+                                    Some(FrameKind::Array) => {
+                                        writer.end_array();
+                                        State::AfterValue
+                                    }
+                                    _ => State::Error,
+                                }
                             }
                         }
                         b'{' => {
                             after_comma = false;
-                            frames.push(Frame::Obj {
-                                key: Cow::Borrowed(""),
-                                members: Vec::new(),
-                            });
+                            frames.push(FrameKind::Object);
+                            writer.start_object();
                             State::ObjectStart
                         }
                         b'[' => {
                             after_comma = false;
-                            frames.push(Frame::Arr {
-                                elements: Vec::new(),
-                            });
+                            frames.push(FrameKind::Array);
+                            writer.start_array();
                             State::ArrayStart
                         }
                         b'"' => {
@@ -617,30 +845,30 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
                     let byte = chunk[chunk_offset];
                     match byte {
                         b',' => match frames.last() {
-                            Some(Frame::Obj { .. }) => {
+                            Some(FrameKind::Object) => {
                                 after_comma = true;
                                 State::ObjectStart
                             }
-                            Some(Frame::Arr { .. }) => {
+                            Some(FrameKind::Array) => {
                                 after_comma = true;
                                 State::ArrayStart
                             }
                             None => State::Error,
                         },
-                        b'}' => {
-                            if close_frame(b'}', &mut frames, &mut result) {
+                        b'}' => match frames.pop() {
+                            Some(FrameKind::Object) => {
+                                writer.end_object();
                                 State::AfterValue
-                            } else {
-                                State::Error
                             }
-                        }
-                        b']' => {
-                            if close_frame(b']', &mut frames, &mut result) {
+                            _ => State::Error,
+                        },
+                        b']' => match frames.pop() {
+                            Some(FrameKind::Array) => {
+                                writer.end_array();
                                 State::AfterValue
-                            } else {
-                                State::Error
                             }
-                        }
+                            _ => State::Error,
+                        },
                         _ => State::Error,
                     }
                 }
@@ -652,9 +880,8 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
 
     // Flush a trailing atom not followed by a delimiter (e.g. top-level `42`).
     if state == State::AtomChars {
-        match parse_atom(&src[atom_start..]) {
-            Some(val) => push_value(val, &mut frames, &mut result),
-            None => return None,
+        if !write_atom(&src[atom_start..], &mut writer) {
+            return None;
         }
     } else if state != State::AfterValue {
         return None;
@@ -669,7 +896,7 @@ fn parse_json_impl<'a, F: Fn(&[u8]) -> ByteState>(src: &'a str, classify: F) -> 
         return None;
     }
 
-    result
+    writer.finish()
 }
 
 /// Decode all JSON string escape sequences within `s` (the raw content between
@@ -1318,5 +1545,169 @@ mod tests {
         // Extra closing bracket at top level.
         assert_eq!(run("1}"), None);
         assert_eq!(run("1]"), None);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tape tests
+    // -----------------------------------------------------------------------
+
+    fn run_tape(json: &'static str) -> Option<Tape<'static>> {
+        let x = parse_to_tape(json, classify_xmm);
+        let y = parse_to_tape(json, classify_ymm);
+        let z = parse_to_tape(json, choose_classifier());
+        assert_eq!(
+            x.as_ref().map(|t| &t.entries),
+            z.as_ref().map(|t| &t.entries),
+            "XMM vs ZMM tape differ for: {json:?}"
+        );
+        assert_eq!(
+            y.as_ref().map(|t| &t.entries),
+            z.as_ref().map(|t| &t.entries),
+            "YMM vs ZMM tape differ for: {json:?}"
+        );
+        z
+    }
+
+    fn te_str(s: &'static str) -> TapeEntry<'static> {
+        TapeEntry::String(Cow::Borrowed(s))
+    }
+    fn te_key(s: &'static str) -> TapeEntry<'static> {
+        TapeEntry::Key(Cow::Borrowed(s))
+    }
+    fn te_num(s: &'static str) -> TapeEntry<'static> {
+        TapeEntry::Number(s)
+    }
+
+    #[test]
+    fn tape_scalar_values() {
+        assert_eq!(run_tape("null").unwrap().entries, vec![TapeEntry::Null]);
+        assert_eq!(
+            run_tape("true").unwrap().entries,
+            vec![TapeEntry::Bool(true)]
+        );
+        assert_eq!(
+            run_tape("false").unwrap().entries,
+            vec![TapeEntry::Bool(false)]
+        );
+        assert_eq!(run_tape("42").unwrap().entries, vec![te_num("42")]);
+        assert_eq!(run_tape(r#""hi""#).unwrap().entries, vec![te_str("hi")]);
+    }
+
+    #[test]
+    fn tape_empty_object() {
+        let t = run_tape("{}").unwrap();
+        // StartObject(1) EndObject
+        assert_eq!(
+            t.entries,
+            vec![TapeEntry::StartObject(1), TapeEntry::EndObject]
+        );
+        // StartObject payload points at EndObject
+        assert_eq!(t.entries[0], TapeEntry::StartObject(1));
+    }
+
+    #[test]
+    fn tape_empty_array() {
+        let t = run_tape("[]").unwrap();
+        assert_eq!(
+            t.entries,
+            vec![TapeEntry::StartArray(1), TapeEntry::EndArray]
+        );
+        assert_eq!(t.entries[0], TapeEntry::StartArray(1));
+    }
+
+    #[test]
+    fn tape_simple_object() {
+        // {"a":1} → StartObject Key("a") Number("1") EndObject
+        let t = run_tape(r#"{"a":1}"#).unwrap();
+        assert_eq!(
+            t.entries,
+            vec![
+                TapeEntry::StartObject(3),
+                te_key("a"),
+                te_num("1"),
+                TapeEntry::EndObject,
+            ]
+        );
+        // StartObject carries index of EndObject
+        assert_eq!(t.entries[0], TapeEntry::StartObject(3));
+    }
+
+    #[test]
+    fn tape_simple_array() {
+        // [1,2,3] → StartArray Num Num Num EndArray
+        let t = run_tape(r#"[1,2,3]"#).unwrap();
+        assert_eq!(
+            t.entries,
+            vec![
+                TapeEntry::StartArray(4),
+                te_num("1"),
+                te_num("2"),
+                te_num("3"),
+                TapeEntry::EndArray,
+            ]
+        );
+    }
+
+    #[test]
+    fn tape_nested() {
+        // {"a":[1,2]} → StartObject Key StartArray Num Num EndArray EndObject
+        let t = run_tape(r#"{"a":[1,2]}"#).unwrap();
+        use TapeEntry::*;
+        assert_eq!(
+            t.entries,
+            vec![
+                StartObject(6), // 0
+                te_key("a"),    // 1
+                StartArray(5),  // 2
+                te_num("1"),    // 3
+                te_num("2"),    // 4
+                EndArray,       // 5
+                EndObject,      // 6
+            ]
+        );
+        assert_eq!(t.entries[0], StartObject(6));
+        assert_eq!(t.entries[2], StartArray(5));
+    }
+
+    #[test]
+    fn tape_multi_key_object() {
+        let t = run_tape(r#"{"x":1,"y":2}"#).unwrap();
+        use TapeEntry::*;
+        assert_eq!(
+            t.entries,
+            vec![
+                StartObject(5), // 0 — points to EndObject at index 5
+                te_key("x"),    // 1
+                te_num("1"),    // 2
+                te_key("y"),    // 3
+                te_num("2"),    // 4
+                EndObject,      // 5
+            ]
+        );
+        assert_eq!(t.entries[0], StartObject(5));
+    }
+
+    #[test]
+    fn tape_invalid_returns_none() {
+        assert!(run_tape("[1,2,]").is_none());
+        assert!(run_tape(r#"{"a":1,}"#).is_none());
+        assert!(run_tape("{bad}").is_none());
+    }
+
+    #[test]
+    fn tape_skip_object() {
+        // Verify the skip-forward idiom works.
+        let t = run_tape(r#"[{"x":1},2]"#).unwrap();
+        // entries: StartArray StartObject Key Num EndObject Num EndArray
+        //          0          1           2   3   4         5   6
+        assert_eq!(t.entries.len(), 7);
+        // Skip from StartObject(4) to index 5 (after EndObject).
+        if let TapeEntry::StartObject(end) = t.entries[1] {
+            assert_eq!(end, 4);
+            // After the object the next item is at end + 1 = 5.
+            assert_eq!(t.entries[5], te_num("2"));
+        } else {
+            panic!("expected StartObject at index 1");
+        }
     }
 }
