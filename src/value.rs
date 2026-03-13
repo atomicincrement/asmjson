@@ -188,12 +188,12 @@ impl<'a> JsonWriter<'a> for ValueWriter<'a> {
 mod tests {
     use std::borrow::Cow;
 
-    use crate::{choose_classifier, classify_xmm, classify_ymm, parse_json};
+    use crate::{choose_classifier, classify_u64, classify_ymm, parse_json};
 
     use super::Value;
 
-    fn run_xmm(json: &'static str) -> Option<Value<'static>> {
-        parse_json(json, classify_xmm)
+    fn run_u64(json: &'static str) -> Option<Value<'static>> {
+        parse_json(json, classify_u64)
     }
 
     fn run_ymm(json: &'static str) -> Option<Value<'static>> {
@@ -205,10 +205,10 @@ mod tests {
     }
 
     fn run(json: &'static str) -> Option<Value<'static>> {
-        let x = run_xmm(json);
+        let x = run_u64(json);
         let y = run_ymm(json);
         let z = run_zmm(json);
-        assert_eq!(x, y, "XMM vs YMM differ for: {json:?}");
+        assert_eq!(x, y, "U64 vs YMM differ for: {json:?}");
         assert_eq!(y, z, "YMM vs ZMM differ for: {json:?}");
         z
     }

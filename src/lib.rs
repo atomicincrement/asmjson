@@ -779,91 +779,6 @@ static ZMM_CONSTANTS: ByteStateConstants = ByteStateConstants::new();
 pub type ClassifyFn = fn(&[u8]) -> ByteState;
 
 // ---------------------------------------------------------------------------
-// XMM (SSE2) — 4 × 16-byte registers, 64 bytes total
-// ---------------------------------------------------------------------------
-
-/// Classify 64 bytes using 4 × 16-byte XMM registers (SSE2).
-///
-/// Bytes beyond `src.len()` are zeroed before classification so their bits
-/// are well-defined (they come out as whitespace and are never visited by the
-/// inner parser loop).
-///
-/// Whitespace detection uses the identity:
-///   `unsigned a <= 0x20`  ↔  `psubusb(a, 0x20) == 0`
-/// which avoids signed-comparison pitfalls with high UTF-8 bytes (≥ 0x80).
-pub fn classify_xmm(src: &[u8]) -> ByteState {
-    #[target_feature(enable = "sse2")]
-    unsafe fn imp(src: &[u8]) -> ByteState {
-        unsafe {
-            use std::arch::x86_64::{
-                __m128i, _mm_cmpeq_epi8, _mm_loadu_si128, _mm_movemask_epi8, _mm_set1_epi8,
-                _mm_setzero_si128, _mm_subs_epu8,
-            };
-            assert!(!src.is_empty() && src.len() <= 64);
-
-            // Zero-pad to 64 bytes so all four 16-byte loads are fully defined.
-            let mut buf = [0u8; 64];
-            buf[..src.len()].copy_from_slice(src);
-            let p = buf.as_ptr();
-
-            let v0 = _mm_loadu_si128(p.add(0).cast::<__m128i>());
-            let v1 = _mm_loadu_si128(p.add(16).cast::<__m128i>());
-            let v2 = _mm_loadu_si128(p.add(32).cast::<__m128i>());
-            let v3 = _mm_loadu_si128(p.add(48).cast::<__m128i>());
-
-            let c_ws = _mm_set1_epi8(0x20_u8 as i8); // upper bound for whitespace
-            let c_q = _mm_set1_epi8(b'"' as i8);
-            let c_bs = _mm_set1_epi8(b'\\' as i8);
-            let c_co = _mm_set1_epi8(b',' as i8);
-            let c_cb = _mm_set1_epi8(b'}' as i8);
-            let c_sb = _mm_set1_epi8(b']' as i8);
-            let zero = _mm_setzero_si128();
-
-            // _mm_movemask_epi8 returns i32; only the low 16 bits are meaningful.
-            // Cast via u16 to zero-extend cleanly to u64.
-            macro_rules! movmsk {
-                ($x:expr) => {
-                    _mm_movemask_epi8($x) as u16 as u64
-                };
-            }
-            // unsigned a <= 0x20 via saturating subtract: psubusb(a, 0x20) == 0
-            macro_rules! ws {
-                ($v:expr) => {
-                    movmsk!(_mm_cmpeq_epi8(_mm_subs_epu8($v, c_ws), zero))
-                };
-            }
-            macro_rules! eq {
-                ($v:expr, $c:expr) => {
-                    movmsk!(_mm_cmpeq_epi8($v, $c))
-                };
-            }
-            // Combine four 16-bit masks into one 64-bit mask.
-            macro_rules! combine4 {
-                ($m0:expr, $m1:expr, $m2:expr, $m3:expr) => {
-                    $m0 | ($m1 << 16) | ($m2 << 32) | ($m3 << 48)
-                };
-            }
-
-            let whitespace = combine4!(ws!(v0), ws!(v1), ws!(v2), ws!(v3));
-            let quotes = combine4!(eq!(v0, c_q), eq!(v1, c_q), eq!(v2, c_q), eq!(v3, c_q));
-            let backslashes = combine4!(eq!(v0, c_bs), eq!(v1, c_bs), eq!(v2, c_bs), eq!(v3, c_bs));
-            let commas = combine4!(eq!(v0, c_co), eq!(v1, c_co), eq!(v2, c_co), eq!(v3, c_co));
-            let cl_braces = combine4!(eq!(v0, c_cb), eq!(v1, c_cb), eq!(v2, c_cb), eq!(v3, c_cb));
-            let cl_brackets = combine4!(eq!(v0, c_sb), eq!(v1, c_sb), eq!(v2, c_sb), eq!(v3, c_sb));
-            let delimiters = whitespace | commas | cl_braces | cl_brackets;
-
-            ByteState {
-                whitespace,
-                quotes,
-                backslashes,
-                delimiters,
-            }
-        }
-    }
-    unsafe { imp(src) }
-}
-
-// ---------------------------------------------------------------------------
 // YMM (AVX2) — 2 × 32-byte registers, 64 bytes total
 // ---------------------------------------------------------------------------
 
@@ -1099,7 +1014,7 @@ pub fn classify_u64(src: &[u8]) -> ByteState {
 /// let value = parse_json(json, classify);
 /// ```
 ///
-/// The precedence is: AVX-512BW → AVX2 → SSE2 (x86-64) → portable SWAR u64.
+/// The precedence is: AVX-512BW → AVX2 → portable SWAR u64.
 pub fn choose_classifier() -> ClassifyFn {
     #[cfg(target_arch = "x86_64")]
     {
@@ -1109,7 +1024,6 @@ pub fn choose_classifier() -> ClassifyFn {
         if std::is_x86_feature_detected!("avx2") {
             return classify_ymm;
         }
-        return classify_xmm;
     }
     #[allow(unreachable_code)]
     classify_u64
@@ -1120,7 +1034,7 @@ mod tests {
     use super::*;
 
     // -----------------------------------------------------------------------
-    // Classifier unit tests: compare XMM and YMM bitmasks against ZMM
+    // Classifier unit tests: compare YMM and U64 bitmasks against ZMM
     // -----------------------------------------------------------------------
 
     /// Test that all three next_state_* functions produce identical ByteState
@@ -1142,7 +1056,7 @@ mod tests {
             b"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             // Short slice (1 byte)
             b"x",
-            // Short slice (16 bytes — one XMM register exactly)
+            // Short slice (16 bytes)
             b"0123456789abcdef",
             // Short slice (32 bytes — one YMM register exactly)
             b"0123456789abcdef0123456789abcdef",
@@ -1152,15 +1066,9 @@ mod tests {
             // Truncate to max 64 bytes (all are ≤ 64 here)
             let src = &input[..input.len().min(64)];
             let zmm = classify_zmm(src);
-            let xmm = classify_xmm(src);
             let ymm = classify_ymm(src);
             let u64 = classify_u64(src);
 
-            assert_eq!(
-                xmm, zmm,
-                "XMM vs ZMM mismatch on input {:?}\n  xmm ws={:#018x} zmm ws={:#018x}",
-                input, xmm.whitespace, zmm.whitespace
-            );
             assert_eq!(
                 ymm, zmm,
                 "YMM vs ZMM mismatch on input {:?}\n  ymm ws={:#018x} zmm ws={:#018x}",

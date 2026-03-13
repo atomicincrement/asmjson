@@ -169,18 +169,18 @@ pub(crate) fn tape_skip(entries: &[TapeEntry<'_>], pos: usize) -> usize {
 mod tests {
     use std::borrow::Cow;
 
-    use crate::{choose_classifier, classify_xmm, classify_ymm, parse_to_tape};
+    use crate::{choose_classifier, classify_u64, classify_ymm, parse_to_tape};
 
     use super::{Tape, TapeEntry};
 
     fn run_tape(json: &'static str) -> Option<Tape<'static>> {
-        let x = parse_to_tape(json, classify_xmm);
+        let x = parse_to_tape(json, classify_u64);
         let y = parse_to_tape(json, classify_ymm);
         let z = parse_to_tape(json, choose_classifier());
         assert_eq!(
             x.as_ref().map(|t| &t.entries),
             z.as_ref().map(|t| &t.entries),
-            "XMM vs ZMM tape differ for: {json:?}"
+            "U64 vs ZMM tape differ for: {json:?}"
         );
         assert_eq!(
             y.as_ref().map(|t| &t.entries),

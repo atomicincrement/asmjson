@@ -2,7 +2,7 @@
 use asmjson::choose_classifier;
 #[cfg(feature = "stats")]
 use asmjson::stats;
-use asmjson::{classify_u64, classify_xmm, classify_ymm, classify_zmm, parse_json, parse_to_tape};
+use asmjson::{classify_u64, classify_ymm, classify_zmm, parse_json, parse_to_tape};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 // ---------------------------------------------------------------------------
@@ -161,9 +161,6 @@ fn bench_string_array(c: &mut Criterion) {
     print_stats("string_array", &data);
     let mut group = c.benchmark_group("string_array");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("asmjson/xmm", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_xmm)));
-    });
     group.bench_function("asmjson/ymm", |b| {
         b.iter(|| std::hint::black_box(parse_json(&data, classify_ymm)));
     });
@@ -199,9 +196,6 @@ fn bench_string_object(c: &mut Criterion) {
     print_stats("string_object", &data);
     let mut group = c.benchmark_group("string_object");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("asmjson/xmm", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_xmm)));
-    });
     group.bench_function("asmjson/ymm", |b| {
         b.iter(|| std::hint::black_box(parse_json(&data, classify_ymm)));
     });
@@ -237,9 +231,6 @@ fn bench_mixed(c: &mut Criterion) {
     print_stats("mixed", &data);
     let mut group = c.benchmark_group("mixed");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("asmjson/xmm", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_xmm)));
-    });
     group.bench_function("asmjson/ymm", |b| {
         b.iter(|| std::hint::black_box(parse_json(&data, classify_ymm)));
     });

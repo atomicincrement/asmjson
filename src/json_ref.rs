@@ -349,7 +349,7 @@ impl<'a, J: JsonRef<'a>> JsonRef<'a> for Option<J> {
 mod tests {
     use crate::tape::Tape;
     use crate::value::Value;
-    use crate::{choose_classifier, classify_xmm, classify_ymm, parse_json, parse_to_tape};
+    use crate::{choose_classifier, classify_u64, classify_ymm, parse_json, parse_to_tape};
 
     use super::JsonRef;
 
@@ -358,22 +358,22 @@ mod tests {
     // -----------------------------------------------------------------------
 
     fn run(json: &'static str) -> Option<Value<'static>> {
-        let x = parse_json(json, classify_xmm);
+        let x = parse_json(json, classify_u64);
         let y = parse_json(json, classify_ymm);
         let z = parse_json(json, choose_classifier());
-        assert_eq!(x, y, "XMM vs YMM differ for: {json:?}");
+        assert_eq!(x, y, "U64 vs YMM differ for: {json:?}");
         assert_eq!(y, z, "YMM vs ZMM differ for: {json:?}");
         z
     }
 
     fn run_tape(json: &'static str) -> Option<Tape<'static>> {
-        let x = parse_to_tape(json, classify_xmm);
+        let x = parse_to_tape(json, classify_u64);
         let y = parse_to_tape(json, classify_ymm);
         let z = parse_to_tape(json, choose_classifier());
         assert_eq!(
             x.as_ref().map(|t| &t.entries),
             z.as_ref().map(|t| &t.entries),
-            "XMM vs ZMM tape differ for: {json:?}"
+            "U64 vs ZMM tape differ for: {json:?}"
         );
         assert_eq!(
             y.as_ref().map(|t| &t.entries),
