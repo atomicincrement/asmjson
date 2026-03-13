@@ -715,3 +715,52 @@ objects/arrays inside a value position is O(1) — the `StartObject(end)` and
 ### Commit
 
 `eb5de55` feat: add TapeRef::object_iter and array_iter
+
+## Session 17 — Remove Value type
+
+### Remove `Value<'a>` and `parse_json`
+
+**What was done**
+
+The `Value<'a>` tree type, `parse_json` entry point, `ValueWriter`, and all
+supporting code in `src/value.rs` were removed.  The `Tape` / `TapeRef` path
+is now the sole output format.
+
+Specifically:
+
+- `src/value.rs` deleted (`git rm`).
+- `src/lib.rs`: removed `pub mod value`, `pub use value::Value`,
+  `use value::{ValueWriter, is_valid_json_number}`, and the `parse_json`
+  function + its doc-test.  `is_valid_json_number` (previously in
+  `value.rs`) was moved inline into `lib.rs` as a private function, since it
+  is still needed by `write_atom`.
+- `src/json_ref.rs`: removed `use crate::value::Value`, the
+  `impl JsonRef<'a> for &'a Value<'a>` block, and the `&'a Value<'a>` bullet
+  from the trait's doc comment.  Test module rewritten: `fn run()` and
+  `fn run_both()` helpers deleted; all tests that exercised both `&Value` and
+  `TapeRef` paths were updated to use only `run_tape()`.  The
+  `jsonref_scalars_value` test was removed entirely.
+- `benches/parse.rs`: the `#[cfg(feature = "stats")]` `print_stats` helper
+  was updated to alias `parse_to_tape` as `parse_json` so that the
+  `#[cfg(feature = "stats")]` gate continues to compile.
+- `README.md`: quick-start example updated to use `parse_to_tape`; Output
+  formats list trimmed to two entries.
+
+**Design decisions**
+
+`Value` was a convenient heap-allocated tree that mirrored `serde_json::Value`,
+but benchmarks showed it was always slower than the tape and the codebase now
+focuses on flat-tape output.  Removing it simplifies the public API and
+eliminates ~500 lines of code.
+
+`is_valid_json_number` is still needed at parse time (in `write_atom`) so it
+was migrated to `lib.rs` rather than deleted; it remains private.
+
+**Results**
+
+18 unit tests + 4 doc-tests pass; zero warnings.  5 files changed,
+69 insertions, 590 deletions.
+
+**Commit**
+
+`cbb1e6b` Remove Value type and parse_json; tape is the only output format
