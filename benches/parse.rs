@@ -2,7 +2,7 @@
 use asmjson::choose_classifier;
 #[cfg(feature = "stats")]
 use asmjson::stats;
-use asmjson::{classify_xmm, classify_ymm, classify_zmm, parse_json};
+use asmjson::{classify_xmm, classify_ymm, classify_zmm, parse_json, parse_to_tape};
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 // ---------------------------------------------------------------------------
@@ -169,6 +169,9 @@ fn bench_string_array(c: &mut Criterion) {
     });
     group.bench_function("asmjson/zmm", |b| {
         b.iter(|| std::hint::black_box(parse_json(&data, classify_zmm)));
+    });
+    group.bench_function("asmjson/zmm/tape", |b| {
+        b.iter(|| std::hint::black_box(parse_to_tape(&data, classify_zmm)));
     });
     group.bench_with_input(
         BenchmarkId::new("simd-json", "borrowed"),
