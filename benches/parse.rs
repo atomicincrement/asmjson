@@ -202,7 +202,7 @@ fn bench_string_array(c: &mut Criterion) {
     print_stats("string_array", &data);
     let mut group = c.benchmark_group("string_array");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("asmjson/zmm/tape", |b| {
+    group.bench_function("asmjson/zmm", |b| {
         b.iter(|| {
             let tape = parse_to_tape(&data, classify_zmm).unwrap();
             std::hint::black_box(tape_sum_lens(&tape))
@@ -240,7 +240,7 @@ fn bench_string_object(c: &mut Criterion) {
     print_stats("string_object", &data);
     let mut group = c.benchmark_group("string_object");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("asmjson/zmm/tape", |b| {
+    group.bench_function("asmjson/zmm", |b| {
         b.iter(|| {
             let tape = parse_to_tape(&data, classify_zmm).unwrap();
             std::hint::black_box(tape_sum_lens(&tape))
@@ -278,7 +278,7 @@ fn bench_mixed(c: &mut Criterion) {
     print_stats("mixed", &data);
     let mut group = c.benchmark_group("mixed");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("asmjson/zmm/tape", |b| {
+    group.bench_function("asmjson/zmm", |b| {
         b.iter(|| {
             let tape = parse_to_tape(&data, classify_zmm).unwrap();
             std::hint::black_box(tape_sum_lens(&tape))

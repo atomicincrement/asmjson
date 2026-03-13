@@ -52,10 +52,10 @@ for a fair comparison because sonic-rs defers decoding string content until the
 value is accessed (lazy evaluation); a parse-only measurement would undercount
 its work relative to any real use-case where the parsed data is actually read.
 
-| Parser             | string array | string object | mixed      |
-|--------------------|:------------:|:-------------:|:----------:|
-| asmjson zmm (tape) | 8.20 GiB/s   | 5.48 GiB/s    | 370 MiB/s  |
-| sonic-rs           | 7.37 GiB/s   | 4.21 GiB/s    | 368 MiB/s  |
+| Parser       | string array | string object | mixed      |
+|--------------|:------------:|:-------------:|:----------:|
+| asmjson zmm  | 8.20 GiB/s   | 5.48 GiB/s    | 370 MiB/s  |
+| sonic-rs     | 7.37 GiB/s   | 4.21 GiB/s    | 368 MiB/s  |
 
 asmjson leads on all three workloads.  The flat `Tape` output avoids
 object/array allocation entirely, and fully decoded escape sequences
