@@ -674,3 +674,44 @@ where sonic-rs's lazy trick gives less advantage.
 ### Commit
 
 `ee28983` bench: add sonic-rs comparison
+
+---
+
+## Session 14 — TapeRef::object_iter and array_iter
+
+### What was done
+
+Added two new iterator types to `src/tape.rs` and inherent methods on
+`TapeRef` to create them:
+
+- **`TapeObjectIter<'t, 'src>`** — yields `(&'t str, TapeRef<'t, 'src>)` pairs
+  for every key-value entry in a JSON object, in document order.  Returned by
+  `TapeRef::object_iter()`, which returns `None` if the cursor is not on a
+  `StartObject` entry.
+
+- **`TapeArrayIter<'t, 'src>`** — yields one `TapeRef<'t, 'src>` per array
+  element in document order.  Returned by `TapeRef::array_iter()`, which
+  returns `None` if the cursor is not on a `StartArray` entry.
+
+Both types were added to the crate-root re-exports.
+
+### Design decisions
+
+The iterators are inherent methods on `TapeRef` rather than part of the
+`JsonRef` trait because the `JsonRef` trait is generic (`type Item`) and
+returning an iterator type directly from the trait would require either
+associated types for the iterator types (adding trait complexity) or
+`impl Trait` returns (not stable in traits without GATs boilerplate).  Keeping
+them as inherent methods is simpler and zero-cost.
+
+Both iterators advance via `tape_skip`, so skipping over nested
+objects/arrays inside a value position is O(1) — the `StartObject(end)` and
+`StartArray(end)` payloads let the iterator jump directly to the next sibling.
+
+### Results
+
+32 unit tests + 5 doc-tests pass; zero warnings.
+
+### Commit
+
+`eb5de55` feat: add TapeRef::object_iter and array_iter
