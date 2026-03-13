@@ -1,6 +1,43 @@
-//! This module parses JSON strings 64 bytes at a time using AVX-512BW
-//! instructions to quickly identify structural characters, enabling entire
-//! whitespace runs and string bodies to be skipped in a single operation.
+//! A fast JSON parser that classifies 64 bytes at a time using SIMD or portable
+//! SWAR (SIMD-Within-A-Register) bit tricks, enabling entire whitespace runs and
+//! string bodies to be skipped in a single operation.
+//!
+//! # Quick start
+//!
+//! ```rust
+//! use asmjson::{parse_json, choose_classifier, JsonRef};
+//!
+//! let classify = choose_classifier(); // picks best for the current CPU
+//! let value = parse_json(r#"{"name":"Alice","age":30}"#, classify).unwrap();
+//!
+//! assert_eq!(value.get("name").as_str(), Some("Alice"));
+//! assert_eq!(value.get("age").as_i64(), Some(30));
+//! ```
+//!
+//! For repeated parses, store the result of [`choose_classifier`] in a `static
+//! once cell or pass it through your application rather than calling it on every
+//! parse.
+//!
+//! # Output formats
+//!
+//! - [`parse_json`] — allocates a nested [`Value`] tree (convenient, heap-allocated).
+//! - [`parse_to_tape`] — allocates a flat [`Tape`] of tokens with O(1) structural skips.
+//! - [`parse_with`] — drives a custom [`JsonWriter`] sink; zero extra allocation.
+//!
+//! # Classifiers
+//!
+//! The classifier is a plain function pointer (`fn(&[u8]) -> `[`ByteState`]`)`
+//! that labels 64 bytes at a time. Three are provided:
+//!
+//! | Classifier | ISA | Speed |
+//! |---|---|---|
+//! | [`classify_zmm`] | AVX-512BW | fastest |
+//! | [`classify_ymm`] | AVX2 | fast |
+//! | [`classify_u64`] | portable SWAR | good |
+//!
+//! Use [`choose_classifier`] to select automatically at runtime.
+//!
+//! # Internal state machine
 //!
 //! Each byte of the input is labelled below with the state that handles it.
 //! States that skip whitespace via `trailing_zeros` handle both the whitespace
@@ -184,10 +221,9 @@ enum FrameKind {
 /// Receives a stream of structural events as the parser walks the input.
 ///
 /// Implement this trait to produce any output from a single pass over the JSON
-/// source.  Two built-in implementations are provided:
-///
-/// * [`ValueWriter`] — produces a nested [`Value`] tree (used by [`parse_json`]).
-/// * [`TapeWriter`] — produces a flat [`Tape`] (used by [`parse_to_tape`]).
+/// source.  Two built-in implementations are provided — the one used by
+/// [`parse_json`] (producing a nested [`Value`] tree) and the one used by
+/// [`parse_to_tape`] (producing a flat [`Tape`]).
 ///
 /// A custom writer can use [`parse_with`] to drive the parse.
 pub trait JsonWriter<'src> {
@@ -252,13 +288,32 @@ fn write_atom<'a, W: JsonWriter<'a>>(s: &'a str, w: &mut W) -> bool {
 
 /// Parse `src` into a [`Value`] tree using the given classifier.
 ///
-/// This is a convenience wrapper around [`parse_with`] that uses the built-in
-/// [`ValueWriter`].
+/// Returns `None` if the input is not valid JSON.
+///
+/// ```rust
+/// use asmjson::{parse_json, choose_classifier, JsonRef};
+/// let v = parse_json(r#"[1, "two", true]"#, choose_classifier()).unwrap();
+/// assert_eq!(v.index_at(1).as_str(), Some("two"));
+/// ```
 pub fn parse_json<'a>(src: &'a str, classify: ClassifyFn) -> Option<Value<'a>> {
     parse_with(src, classify, ValueWriter::new())
 }
 
 /// Parse `src` into a flat [`Tape`] using the given classifier.
+///
+/// Returns `None` if the input is not valid JSON.
+///
+/// The tape is more efficient than a [`Value`] tree for large inputs because it
+/// avoids recursive allocation.  `StartObject(n)` / `StartArray(n)` entries
+/// carry the index of the matching closer so entire subtrees can be skipped in
+/// O(1).  Access the tape via [`Tape::root`] which returns a [`TapeRef`] cursor
+/// that implements [`JsonRef`].
+///
+/// ```rust
+/// use asmjson::{parse_to_tape, choose_classifier, JsonRef};
+/// let tape = parse_to_tape(r#"{"x":1}"#, choose_classifier()).unwrap();
+/// assert_eq!(tape.root().get("x").as_i64(), Some(1));
+/// ```
 pub fn parse_to_tape<'a>(src: &'a str, classify: ClassifyFn) -> Option<Tape<'a>> {
     parse_with(src, classify, TapeWriter::new())
 }

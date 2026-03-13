@@ -9,11 +9,20 @@ use crate::JsonWriter;
 /// A parsed JSON value (tree representation).
 #[derive(PartialEq, Debug, Clone)]
 pub enum Value<'a> {
+    /// A JSON string.  Borrowed from the source when the content contains no
+    /// escape sequences; owned otherwise.
     String(Cow<'a, str>),
+    /// A JSON number stored as the raw source slice (e.g. `"3.14"`, `"-1e5"`).
+    /// Use [`crate::JsonRef::as_i64`], [`crate::JsonRef::as_u64`], or
+    /// [`crate::JsonRef::as_f64`] to parse it.
     Number(&'a str),
+    /// A JSON boolean.
     Bool(bool),
+    /// JSON `null`.
     Null,
+    /// A JSON object stored as an ordered slice of key-value pairs.
     Object(Box<[(Cow<'a, str>, Value<'a>)]>),
+    /// A JSON array.
     Array(Box<[Value<'a>]>),
 }
 
