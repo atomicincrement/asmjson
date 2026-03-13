@@ -46,6 +46,12 @@ Use `choose_classifier` to select automatically at runtime.
 Measured on a single core with `cargo bench` against 10 MiB of synthetic JSON.
 Comparison point is `sonic-rs` (lazy Value, AVX2).
 
+Each benchmark measures **parse + full traversal**: after parsing, every string
+value and object key is visited and its length accumulated.  This is necessary
+for a fair comparison because sonic-rs defers decoding string content until the
+value is accessed (lazy evaluation); a parse-only measurement would undercount
+its work relative to any real use-case where the parsed data is actually read.
+
 | Parser             | string array | string object | mixed      |
 |--------------------|:------------:|:-------------:|:----------:|
 | asmjson zmm (tape) | 8.20 GiB/s   | 5.48 GiB/s    | 370 MiB/s  |
@@ -53,7 +59,8 @@ Comparison point is `sonic-rs` (lazy Value, AVX2).
 
 asmjson leads on all three workloads.  The flat `Tape` output avoids
 object/array allocation entirely, and fully decoded escape sequences
-(`\uXXXX` → `Cow<str>`) are computed once at parse time.
+(`\uXXXX` → `Cow<str>`) are computed once at parse time rather than on every
+access.
 
 ## Internal state machine
 
