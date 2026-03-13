@@ -54,13 +54,18 @@ its work relative to any real use-case where the parsed data is actually read.
 
 | Parser       | string array | string object | mixed      |
 |--------------|:------------:|:-------------:|:----------:|
-| asmjson zmm  | 8.20 GiB/s   | 5.48 GiB/s    | 370 MiB/s  |
-| sonic-rs     | 7.37 GiB/s   | 4.21 GiB/s    | 368 MiB/s  |
+| asmjson zmm  | 8.09 GiB/s   | 5.45 GiB/s    | 364 MiB/s  |
+| sonic-rs     | 7.44 GiB/s   | 4.22 GiB/s    | 485 MiB/s  |
+| asmjson u64  | 6.65 GiB/s   | 4.56 GiB/s    | 358 MiB/s  |
+| serde_json   | 2.46 GiB/s   | 593 MiB/s     | 83.6 MiB/s |
 
-asmjson leads on all three workloads.  The flat `Tape` output avoids
-object/array allocation entirely, and fully decoded escape sequences
-(`\uXXXX` → `Cow<str>`) are computed once at parse time rather than on every
-access.
+asmjson zmm leads on string-dominated workloads, where fully decoding escape
+sequences once at parse time and storing them in a flat tape pays off.
+sonic-rs leads on the mixed workload (numbers, booleans, nested objects with
+short strings), where its lazy string decoding defers more work and its
+AVX2-accelerated structural parsing is well-suited to the denser punctuation.
+The portable `u64` SWAR classifier is competitive with sonic-rs on string
+objects despite using no SIMD instructions.
 
 ## Internal state machine
 
