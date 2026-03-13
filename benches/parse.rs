@@ -1,9 +1,11 @@
 #[cfg(feature = "stats")]
 use asmjson::choose_classifier;
 #[cfg(feature = "stats")]
+use asmjson::parse_json;
+#[cfg(feature = "stats")]
 use asmjson::stats;
-use asmjson::{classify_u64, classify_ymm, classify_zmm, parse_json, parse_to_tape};
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use asmjson::{classify_zmm, parse_to_tape};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 // ---------------------------------------------------------------------------
 // Stats helper — compiled in only with --features stats
@@ -161,35 +163,26 @@ fn bench_string_array(c: &mut Criterion) {
     print_stats("string_array", &data);
     let mut group = c.benchmark_group("string_array");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("asmjson/ymm", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_ymm)));
-    });
-    group.bench_function("asmjson/zmm", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_zmm)));
-    });
     group.bench_function("asmjson/zmm/tape", |b| {
         b.iter(|| std::hint::black_box(parse_to_tape(&data, classify_zmm)));
     });
-    group.bench_function("asmjson/u64", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_u64)));
-    });
-    group.bench_with_input(
-        BenchmarkId::new("simd-json", "borrowed"),
-        &data.as_bytes().to_vec(),
-        |b, input| {
-            b.iter_batched(
-                || input.clone(),
-                |mut buf| {
-                    drop(simd_json::to_borrowed_value(&mut buf).unwrap());
-                    std::hint::black_box(buf)
-                },
-                criterion::BatchSize::LargeInput,
-            );
-        },
-    );
-    group.bench_function("serde_json", |b| {
-        b.iter(|| std::hint::black_box(serde_json::from_str::<serde_json::Value>(&data).unwrap()));
-    });
+    // group.bench_with_input(
+    //     BenchmarkId::new("simd-json", "borrowed"),
+    //     &data.as_bytes().to_vec(),
+    //     |b, input| {
+    //         b.iter_batched(
+    //             || input.clone(),
+    //             |mut buf| {
+    //                 drop(simd_json::to_borrowed_value(&mut buf).unwrap());
+    //                 std::hint::black_box(buf)
+    //             },
+    //             criterion::BatchSize::LargeInput,
+    //         );
+    //     },
+    // );
+    // group.bench_function("serde_json", |b| {
+    //     b.iter(|| std::hint::black_box(serde_json::from_str::<serde_json::Value>(&data).unwrap()));
+    // });
     group.bench_function("sonic-rs", |b| {
         b.iter(|| std::hint::black_box(sonic_rs::from_str::<sonic_rs::Value>(&data).unwrap()));
     });
@@ -202,35 +195,26 @@ fn bench_string_object(c: &mut Criterion) {
     print_stats("string_object", &data);
     let mut group = c.benchmark_group("string_object");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("asmjson/ymm", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_ymm)));
-    });
-    group.bench_function("asmjson/zmm", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_zmm)));
-    });
     group.bench_function("asmjson/zmm/tape", |b| {
         b.iter(|| std::hint::black_box(parse_to_tape(&data, classify_zmm)));
     });
-    group.bench_function("asmjson/u64", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_u64)));
-    });
-    group.bench_with_input(
-        BenchmarkId::new("simd-json", "borrowed"),
-        &data.as_bytes().to_vec(),
-        |b, input| {
-            b.iter_batched(
-                || input.clone(),
-                |mut buf| {
-                    drop(simd_json::to_borrowed_value(&mut buf).unwrap());
-                    std::hint::black_box(buf)
-                },
-                criterion::BatchSize::LargeInput,
-            );
-        },
-    );
-    group.bench_function("serde_json", |b| {
-        b.iter(|| std::hint::black_box(serde_json::from_str::<serde_json::Value>(&data).unwrap()));
-    });
+    // group.bench_with_input(
+    //     BenchmarkId::new("simd-json", "borrowed"),
+    //     &data.as_bytes().to_vec(),
+    //     |b, input| {
+    //         b.iter_batched(
+    //             || input.clone(),
+    //             |mut buf| {
+    //                 drop(simd_json::to_borrowed_value(&mut buf).unwrap());
+    //                 std::hint::black_box(buf)
+    //             },
+    //             criterion::BatchSize::LargeInput,
+    //         );
+    //     },
+    // );
+    // group.bench_function("serde_json", |b| {
+    //     b.iter(|| std::hint::black_box(serde_json::from_str::<serde_json::Value>(&data).unwrap()));
+    // });
     group.bench_function("sonic-rs", |b| {
         b.iter(|| std::hint::black_box(sonic_rs::from_str::<sonic_rs::Value>(&data).unwrap()));
     });
@@ -243,36 +227,27 @@ fn bench_mixed(c: &mut Criterion) {
     print_stats("mixed", &data);
     let mut group = c.benchmark_group("mixed");
     group.throughput(Throughput::Bytes(data.len() as u64));
-    group.bench_function("asmjson/ymm", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_ymm)));
-    });
-    group.bench_function("asmjson/zmm", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_zmm)));
-    });
     group.bench_function("asmjson/zmm/tape", |b| {
         b.iter(|| std::hint::black_box(parse_to_tape(&data, classify_zmm)));
     });
-    group.bench_function("asmjson/u64", |b| {
-        b.iter(|| std::hint::black_box(parse_json(&data, classify_u64)));
-    });
-    let bytes = data.as_bytes().to_vec();
-    group.bench_with_input(
-        BenchmarkId::new("simd-json", "borrowed"),
-        &bytes,
-        |b, input| {
-            b.iter_batched(
-                || input.clone(),
-                |mut buf| {
-                    drop(simd_json::to_borrowed_value(&mut buf).unwrap());
-                    std::hint::black_box(buf)
-                },
-                criterion::BatchSize::LargeInput,
-            );
-        },
-    );
-    group.bench_function("serde_json", |b| {
-        b.iter(|| std::hint::black_box(serde_json::from_str::<serde_json::Value>(&data).unwrap()));
-    });
+    // let bytes = data.as_bytes().to_vec();
+    // group.bench_with_input(
+    //     BenchmarkId::new("simd-json", "borrowed"),
+    //     &bytes,
+    //     |b, input| {
+    //         b.iter_batched(
+    //             || input.clone(),
+    //             |mut buf| {
+    //                 drop(simd_json::to_borrowed_value(&mut buf).unwrap());
+    //                 std::hint::black_box(buf)
+    //             },
+    //             criterion::BatchSize::LargeInput,
+    //         );
+    //     },
+    // );
+    // group.bench_function("serde_json", |b| {
+    //     b.iter(|| std::hint::black_box(serde_json::from_str::<serde_json::Value>(&data).unwrap()));
+    // });
     group.bench_function("sonic-rs", |b| {
         b.iter(|| std::hint::black_box(sonic_rs::from_str::<sonic_rs::Value>(&data).unwrap()));
     });
