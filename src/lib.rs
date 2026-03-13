@@ -844,66 +844,70 @@ pub fn classify_ymm(src: &[u8]) -> ByteState {
 /// Bytes beyond `src.len()` are zeroed via masked load; their whitespace bits
 /// are set to 1 (0 <= 0x20) but are never visited by the inner loop.
 pub fn classify_zmm(src: &[u8]) -> ByteState {
-    assert!(!src.is_empty() && src.len() <= 64);
-    // Bits 0..len-1 set, rest clear.
-    let load_mask: u64 = if src.len() == 64 {
-        !0u64
-    } else {
-        (1u64 << src.len()) - 1
-    };
-    let whitespace: u64;
-    let quotes: u64;
-    let backslashes: u64;
-    let delimiters: u64;
-    // ByteStateConstants layout (each field is [u8; 64]):
-    //   +  0 : space
-    //   + 64 : quote
-    //   +128 : backslash
-    //   +192 : comma
-    //   +256 : close_brace
-    //   +320 : close_bracket
-    unsafe {
-        std::arch::asm!(
-            // Masked byte load: only load src.len() bytes, zero the rest.
-            "kmovq k1, {load_mask}",
-            "vmovdqu8 zmm0 {{k1}}{{z}}, zmmword ptr [{src}]",
-            // Issue all six comparisons into distinct k registers so the CPU
-            // can execute them in parallel, then move the results to GP
-            // registers as a batch at the end.
-            "vpcmpub  k2, zmm0, zmmword ptr [{base}      ], 2", // whitespace (<= 0x20) : space   +  0
-            "vpcmpeqb k3, zmm0, zmmword ptr [{base} +  64]",    // quotes               : quote   + 64
-            "vpcmpeqb k4, zmm0, zmmword ptr [{base} + 128]",    // backslashes          : bslash  +128
-            "vpcmpeqb k5, zmm0, zmmword ptr [{base} + 192]",    // comma                : comma   +192
-            "vpcmpeqb k6, zmm0, zmmword ptr [{base} + 256]",    // '}'                  : cbrace  +256
-            "vpcmpeqb k7, zmm0, zmmword ptr [{base} + 320]",    // ']'                  : cbrack  +320
-            // Combine delimiter masks in k-registers (no GP round-trip needed).
-            "korq k5, k5, k6",   // comma | '}'
-            "korq k5, k5, k7",   // | ']'
-            "korq k5, k5, k2",   // | whitespace
-            // Move all results to GP registers.
-            "kmovq {whitespace},  k2",
-            "kmovq {quotes},      k3",
-            "kmovq {backslashes}, k4",
-            "kmovq {delimiters},  k5",
-            src         = in(reg)  src.as_ptr(),
-            base        = in(reg)  &ZMM_CONSTANTS as *const ByteStateConstants,
-            load_mask   = in(reg)  load_mask,
-            whitespace  = out(reg) whitespace,
-            quotes      = out(reg) quotes,
-            backslashes = out(reg) backslashes,
-            delimiters  = out(reg) delimiters,
-            out("zmm0") _,
-            out("k1") _, out("k2") _, out("k3") _,
-            out("k4") _, out("k5") _, out("k6") _, out("k7") _,
-            options(nostack, readonly),
-        );
+    #[target_feature(enable = "avx512bw")]
+    unsafe fn imp(src: &[u8]) -> ByteState {
+        assert!(!src.is_empty() && src.len() <= 64);
+        // Bits 0..len-1 set, rest clear.
+        let load_mask: u64 = if src.len() == 64 {
+            !0u64
+        } else {
+            (1u64 << src.len()) - 1
+        };
+        let whitespace: u64;
+        let quotes: u64;
+        let backslashes: u64;
+        let delimiters: u64;
+        // ByteStateConstants layout (each field is [u8; 64]):
+        //   +  0 : space
+        //   + 64 : quote
+        //   +128 : backslash
+        //   +192 : comma
+        //   +256 : close_brace
+        //   +320 : close_bracket
+        unsafe {
+            std::arch::asm!(
+                // Masked byte load: only load src.len() bytes, zero the rest.
+                "kmovq k1, {load_mask}",
+                "vmovdqu8 zmm0 {{k1}}{{z}}, zmmword ptr [{src}]",
+                // Issue all six comparisons into distinct k registers so the CPU
+                // can execute them in parallel, then move the results to GP
+                // registers as a batch at the end.
+                "vpcmpub  k2, zmm0, zmmword ptr [{base}      ], 2", // whitespace (<= 0x20) : space   +  0
+                "vpcmpeqb k3, zmm0, zmmword ptr [{base} +  64]",    // quotes               : quote   + 64
+                "vpcmpeqb k4, zmm0, zmmword ptr [{base} + 128]",    // backslashes          : bslash  +128
+                "vpcmpeqb k5, zmm0, zmmword ptr [{base} + 192]",    // comma                : comma   +192
+                "vpcmpeqb k6, zmm0, zmmword ptr [{base} + 256]",    // '}'                  : cbrace  +256
+                "vpcmpeqb k7, zmm0, zmmword ptr [{base} + 320]",    // ']'                  : cbrack  +320
+                // Combine delimiter masks in k-registers (no GP round-trip needed).
+                "korq k5, k5, k6",   // comma | '}'
+                "korq k5, k5, k7",   // | ']'
+                "korq k5, k5, k2",   // | whitespace
+                // Move all results to GP registers.
+                "kmovq {whitespace},  k2",
+                "kmovq {quotes},      k3",
+                "kmovq {backslashes}, k4",
+                "kmovq {delimiters},  k5",
+                src         = in(reg)  src.as_ptr(),
+                base        = in(reg)  &ZMM_CONSTANTS as *const ByteStateConstants,
+                load_mask   = in(reg)  load_mask,
+                whitespace  = out(reg) whitespace,
+                quotes      = out(reg) quotes,
+                backslashes = out(reg) backslashes,
+                delimiters  = out(reg) delimiters,
+                out("zmm0") _,
+                out("k1") _, out("k2") _, out("k3") _,
+                out("k4") _, out("k5") _, out("k6") _, out("k7") _,
+                options(nostack, readonly),
+            );
+        }
+        ByteState {
+            whitespace,
+            quotes,
+            backslashes,
+            delimiters,
+        }
     }
-    ByteState {
-        whitespace,
-        quotes,
-        backslashes,
-        delimiters,
-    }
+    unsafe { imp(src) }
 }
 
 // ---------------------------------------------------------------------------
@@ -1046,20 +1050,30 @@ mod tests {
         for &input in inputs {
             // Truncate to max 64 bytes (all are ≤ 64 here)
             let src = &input[..input.len().min(64)];
-            let zmm = classify_zmm(src);
             let ymm = classify_ymm(src);
-            let u64 = classify_u64(src);
+            let u64_result = classify_u64(src);
 
             assert_eq!(
-                ymm, zmm,
-                "YMM vs ZMM mismatch on input {:?}\n  ymm ws={:#018x} zmm ws={:#018x}",
-                input, ymm.whitespace, zmm.whitespace
+                u64_result, ymm,
+                "U64 vs YMM mismatch on input {:?}\n  u64 ws={:#018x} ymm ws={:#018x}",
+                input, u64_result.whitespace, ymm.whitespace
             );
-            assert_eq!(
-                u64, zmm,
-                "U64 vs ZMM mismatch on input {:?}\n  u64 ws={:#018x} zmm ws={:#018x}",
-                input, u64.whitespace, zmm.whitespace
-            );
+
+            // Only test ZMM when AVX-512BW is available at runtime.
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            if std::is_x86_feature_detected!("avx512bw") {
+                let zmm = classify_zmm(src);
+                assert_eq!(
+                    ymm, zmm,
+                    "YMM vs ZMM mismatch on input {:?}\n  ymm ws={:#018x} zmm ws={:#018x}",
+                    input, ymm.whitespace, zmm.whitespace
+                );
+                assert_eq!(
+                    u64_result, zmm,
+                    "U64 vs ZMM mismatch on input {:?}\n  u64 ws={:#018x} zmm ws={:#018x}",
+                    input, u64_result.whitespace, zmm.whitespace
+                );
+            }
         }
     }
 }
