@@ -121,9 +121,11 @@ unsafe extern "C" {
     /// Entry point assembled from `asm/x86_64/parse_json_zmm_tape.S`.
     ///
     /// Writes [`TapeEntry`] values directly into the pre-allocated `tape_ptr`
-    /// array.  On success sets `*tape_len_out` to the number of entries written
-    /// and returns `true`.  Sets `*has_escapes_out` to `true` if any
-    /// `EscapedString` or `EscapedKey` entry was written.
+    /// array (up to `tape_cap` entries).  On success sets `*tape_len_out` to
+    /// the number of entries written and returns `RESULT_OK` (0).  Sets
+    /// `*has_escapes_out` to `true` if any `EscapedString` or `EscapedKey`
+    /// entry was written.  Returns `RESULT_PARSE_ERROR` (1) for invalid JSON
+    /// or `RESULT_TAPE_OVERFLOW` (2) if `tape_cap` entries are not sufficient.
     fn parse_json_zmm_tape(
         src_ptr: *const u8,
         src_len: usize,
@@ -133,7 +135,8 @@ unsafe extern "C" {
         open_buf: *mut u64,
         unescape_buf: *mut String,
         has_escapes_out: *mut bool,
-    ) -> bool;
+        tape_cap: usize,
+    ) -> u8;
 }
 
 // ---------------------------------------------------------------------------
@@ -510,8 +513,9 @@ pub fn parse_to_tape_zmm_dyn<'a>(src: &'a str) -> Option<Tape<'a>> {
 /// assembly parser that writes [`TapeEntry`] values directly into a
 /// pre-allocated array, bypassing all virtual dispatch.
 ///
-/// The tape array is pre-allocated with `src.len() + 2` entries — sufficient
-/// for any valid JSON — so no reallocation occurs during parsing.
+/// The tape array starts at `src.len() / 4` entries and is doubled on each
+/// `TapeOverflow` result, so parsing always completes without manual capacity
+/// tuning.
 ///
 /// Only available on `x86_64` targets.  Returns `None` if the JSON is
 /// invalid or nesting exceeds [`MAX_JSON_DEPTH`] levels.
@@ -537,47 +541,71 @@ pub fn parse_to_tape_zmm_tape<'a>(src: &'a str) -> Option<Tape<'a>> {
         "parse_to_tape_zmm_tape requires AVX-512BW; \
          use parse_to_tape or choose_classifier() for automatic dispatch"
     );
-    let capacity = src.len() + 2;
-    let mut tape_data: Vec<TapeEntry<'a>> = Vec::with_capacity(capacity);
-    let tape_ptr = tape_data.as_mut_ptr() as *mut TapeEntry<'static>;
+
+    // Result codes matching the assembly RESULT_* constants.
+    const RESULT_OK: u8 = 0;
+    const RESULT_PARSE_ERROR: u8 = 1;
+    const RESULT_TAPE_OVERFLOW: u8 = 2;
 
     let mut frames_buf = [FrameKind::Object; MAX_JSON_DEPTH];
     let mut open_buf = [0u64; MAX_JSON_DEPTH];
     let mut unescape_buf = String::new();
-    let mut tape_len: usize = 0;
-    let mut has_escapes: bool = false;
 
-    // SAFETY:
-    //   • `tape_data` has capacity `src.len() + 2`, which is always enough
-    //     for any valid JSON source (one token per byte at most, plus two
-    //     extra).  The assembly never writes beyond index `tape_len - 1`.
-    //   • `src` lives for at least `'a`; string pointers stored in tape
-    //     entries point into `src`'s bytes and remain valid for `'a`.
-    //   • EscapedString / EscapedKey entries own a `Box<str>` allocated by
-    //     `tape_take_box_str`; `TapeEntry::drop` frees them.
-    //   • `parse_json_zmm_tape` does NOT call `finish`.
-    let ok = unsafe {
-        parse_json_zmm_tape(
-            src.as_ptr(),
-            src.len(),
-            tape_ptr,
-            &raw mut tape_len,
-            frames_buf.as_mut_ptr() as *mut u8,
-            open_buf.as_mut_ptr(),
-            &raw mut unescape_buf,
-            &raw mut has_escapes,
-        )
-    };
+    // Start with a conservative capacity; double on overflow.
+    let mut capacity = (src.len() / 4).max(2);
 
-    if ok {
-        // SAFETY: assembly wrote exactly `tape_len` initialised entries.
-        unsafe { tape_data.set_len(tape_len) };
-        Some(Tape {
-            entries: tape_data,
-            has_escapes,
-        })
-    } else {
-        None
+    loop {
+        let mut tape_data: Vec<TapeEntry<'a>> = Vec::with_capacity(capacity);
+        let tape_ptr = tape_data.as_mut_ptr() as *mut TapeEntry<'static>;
+        let mut tape_len: usize = 0;
+        let mut has_escapes: bool = false;
+        unescape_buf.clear();
+
+        // SAFETY:
+        //   • `tape_data` has exactly `capacity` entries; the assembly checks
+        //     bounds before every write and returns RESULT_TAPE_OVERFLOW if
+        //     the capacity is exceeded.
+        //   • `src` lives for at least `'a`; string pointers stored in tape
+        //     entries point into `src`'s bytes and remain valid for `'a`.
+        //   • EscapedString / EscapedKey entries own a `Box<str>` allocated by
+        //     `tape_take_box_str`; `TapeEntry::drop` frees them.
+        //   • `parse_json_zmm_tape` does NOT call `finish`.
+        let result = unsafe {
+            parse_json_zmm_tape(
+                src.as_ptr(),
+                src.len(),
+                tape_ptr,
+                &raw mut tape_len,
+                frames_buf.as_mut_ptr() as *mut u8,
+                open_buf.as_mut_ptr(),
+                &raw mut unescape_buf,
+                &raw mut has_escapes,
+                capacity,
+            )
+        };
+
+        match result {
+            RESULT_OK => {
+                // SAFETY: assembly wrote exactly `tape_len` initialised entries.
+                unsafe { tape_data.set_len(tape_len) };
+                return Some(Tape {
+                    entries: tape_data,
+                    has_escapes,
+                });
+            }
+            RESULT_PARSE_ERROR => return None,
+            RESULT_TAPE_OVERFLOW => {
+                // The tape was too small; double capacity and retry.
+                // First, set the vec length to `tape_len` so that any
+                // EscapedString / EscapedKey entries already written (which
+                // own a Box<str>) are properly dropped when tape_data goes
+                // out of scope at the end of this block.
+                unsafe { tape_data.set_len(tape_len) };
+                capacity = capacity.saturating_mul(2).max(capacity + 1);
+                continue;
+            }
+            _ => return None, // should not happen
+        }
     }
 }
 
@@ -1615,5 +1643,26 @@ mod tests {
         zmm_tape_rejects("00");
         zmm_tape_rejects("007");
         zmm_tape_rejects("01234567"); // exactly 8 bytes, leading zero
+    }
+
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn zmm_tape_overflow_retry() {
+        // A 200-element array of objects produces ~800+ tape entries.
+        // Initial capacity is src.len()/4 which is far smaller, so the
+        // function must handle at least one TapeOverflow retry automatically.
+        let big: String = {
+            let mut s = String::from("[");
+            for i in 0..200u32 {
+                if i > 0 {
+                    s.push(',');
+                }
+                s.push_str(&format!(r#"{{"k":{i}}}"#));
+            }
+            s.push(']');
+            s
+        };
+        let tape = parse_to_tape_zmm_tape(&big).expect("overflow retry should succeed");
+        assert_eq!(tape.root().unwrap().array_iter().unwrap().count(), 200);
     }
 }

@@ -11,7 +11,7 @@
 // Extern C signature
 // ---------------------------------------------------------------------------
 //
-//   bool parse_json_zmm_tape(
+//   uint8_t parse_json_zmm_tape(
 //       const uint8_t *src_ptr,       // rdi  — pointer to source bytes
 //       size_t         src_len,       // rsi  — byte count
 //       TapeEntry     *tape_ptr,      // rdx  — pre-allocated TapeEntry array
@@ -19,9 +19,12 @@
 //       uint8_t       *frames_buf,    // r8   — [FrameKind; 64], u8 per entry
 //       uint64_t      *open_buf,      // r9   — [usize; 64] backfill index stack
 //       void          *unescape_buf,  // [rsp+8]  — *mut String for escape decoding
-//       bool          *has_escapes_out // [rsp+16] — written to 1 if any EscapedString/EscapedKey
+//       bool          *has_escapes_out, // [rsp+16] — written to 1 if any EscapedString/EscapedKey
+//       size_t         tape_cap       // [rsp+24] — capacity of tape_ptr array in entries
 //   );
-//   Returns: al = 1 on success, 0 on error.
+//   Returns (u8): RESULT_OK(0) on success,
+//                RESULT_PARSE_ERROR(1) on parse failure,
+//                RESULT_TAPE_OVERFLOW(2) if tape_cap entries were insufficient.
 //
 // FrameKind encoding: 0 = Object, 1 = Array  (#[repr(u8)])
 //
@@ -89,6 +92,7 @@
 // After five pushes  rsp = rbp - 40.  sub rsp, 152  →  rsp = rbp - 192.
 // 192 % 16 == 0  ✓  (required for ABI-aligned calls)
 //
+//   [rbp +32]  tape_cap                 (9th arg, caller's stack slot)
 //   [rbp +24]  has_escapes_out ptr      (8th arg, caller's stack slot)
 //   [rbp +16]  unescape_buf ptr         (7th arg, caller's stack slot)
 //   [rbp + 8]  return address
@@ -141,6 +145,12 @@
 .equ LOC_OPEN_BUF,    -184     // open_buf pointer
 .equ LOC_OPEN_DEPTH,  -192     // current open-stack depth
 .equ LOC_HAS_ESC_OUT, +24      // has_escapes_out pointer (8th arg, caller's stack)
+.equ LOC_TAPE_CAP,    +32      // tape capacity in entries (9th arg, caller's stack)
+
+// Result codes (returned in al)
+.equ RESULT_OK,             0
+.equ RESULT_PARSE_ERROR,    1
+.equ RESULT_TAPE_OVERFLOW,  2
 
 // TapeEntryKind discriminants (bits 63-60 of tag_payload)
 .equ TAPE_KIND_NULL,           0
@@ -343,6 +353,8 @@ parse_json_zmm_tape:
     mov     qword ptr [r10 + r11*8], rbx
     inc     qword ptr [rbp + LOC_OPEN_DEPTH]
     // Write StartObject entry (payload backfilled on close)
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_OBJECT
@@ -367,6 +379,8 @@ parse_json_zmm_tape:
     mov     r11, qword ptr [rbp + LOC_OPEN_DEPTH]
     mov     qword ptr [r10 + r11*8], rbx
     inc     qword ptr [rbp + LOC_OPEN_DEPTH]
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_ARRAY
@@ -430,6 +444,8 @@ parse_json_zmm_tape:
     cmp     byte ptr [rbp + LOC_STR_ESC], 0
     jne     .Lsc_emit_escaped
     // Borrow: write String entry directly (rcx preserved — no call)
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, rdx
@@ -470,6 +486,8 @@ parse_json_zmm_tape:
     mov     rsi, qword ptr [rbp + LOC_ATOM_START]  // box_ptr
     mov     rdx, qword ptr [rbp + LOC_STR_START]   // box_len
     // Write EscapedString entry
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, rdx
@@ -583,6 +601,8 @@ parse_json_zmm_tape:
     // Borrow key: write Key entry (rcx preserved — no call)
     mov     rsi, qword ptr [rbp + LOC_KEY_PTR]
     mov     rdx, qword ptr [rbp + LOC_KEY_LEN]
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, rdx
@@ -621,6 +641,8 @@ parse_json_zmm_tape:
     mov     rsi, qword ptr [rbp + LOC_ATOM_START]  // box_ptr
     mov     rdx, qword ptr [rbp + LOC_STR_START]   // box_len
     // Write EscapedKey entry
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, rdx
@@ -690,6 +712,8 @@ parse_json_zmm_tape:
     mov     r11, qword ptr [rbp + LOC_OPEN_DEPTH]
     mov     qword ptr [r10 + r11*8], rbx
     inc     qword ptr [rbp + LOC_OPEN_DEPTH]
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_OBJECT
@@ -714,6 +738,8 @@ parse_json_zmm_tape:
     mov     r11, qword ptr [rbp + LOC_OPEN_DEPTH]
     mov     qword ptr [r10 + r11*8], rbx
     inc     qword ptr [rbp + LOC_OPEN_DEPTH]
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_ARRAY
@@ -763,6 +789,8 @@ parse_json_zmm_tape:
     mov     rdx, r9
     add     rdx, rcx
     sub     rdx, qword ptr [rbp + LOC_ATOM_START]
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     call    .Lemit_atom
     test    al, al
     jz      .Lerror
@@ -849,6 +877,8 @@ parse_json_zmm_tape:
     shr     r10, 4
     or      qword ptr [rax], r10                  // patch end_idx into StartObject
     // Write EndObject entry at tape[rbx]
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_END_OBJECT
@@ -927,6 +957,8 @@ parse_json_zmm_tape:
     shr     r10, 4
     or      qword ptr [rax], r10                  // patch end_idx into StartArray
     // Write EndArray entry at tape[rbx]
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_END_ARRAY
@@ -951,6 +983,8 @@ parse_json_zmm_tape:
     mov     r11, qword ptr [rbp + LOC_OPEN_DEPTH]
     mov     qword ptr [r10 + r11*8], rbx
     inc     qword ptr [rbp + LOC_OPEN_DEPTH]
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_OBJECT
@@ -975,6 +1009,8 @@ parse_json_zmm_tape:
     mov     r11, qword ptr [rbp + LOC_OPEN_DEPTH]
     mov     qword ptr [r10 + r11*8], rbx
     inc     qword ptr [rbp + LOC_OPEN_DEPTH]
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_ARRAY
@@ -1074,6 +1110,8 @@ parse_json_zmm_tape:
     shr     r10, 4
     or      qword ptr [rax], r10
     // Write EndObject
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_END_OBJECT
@@ -1111,6 +1149,8 @@ parse_json_zmm_tape:
     shr     r10, 4
     or      qword ptr [rax], r10
     // Write EndArray
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_END_ARRAY
@@ -1138,6 +1178,8 @@ parse_json_zmm_tape:
     lea     rsi, [r12 + rsi]
     mov     rdx, r9
     sub     rdx, qword ptr [rbp + LOC_ATOM_START]
+    cmp     rbx, qword ptr [rbp + LOC_TAPE_CAP]
+    jae     .Ltape_overflow
     call    .Lemit_atom
     test    al, al
     jz      .Lerror
@@ -1154,7 +1196,7 @@ parse_json_zmm_tape:
     // Store tape_len to *tape_len_out
     mov     rax, qword ptr [rbp + LOC_TLEN_OUT]
     mov     qword ptr [rax], rbx
-    mov     al, 1           // return true
+    mov     al, RESULT_OK           // return Ok
     jmp     .Lepilogue
 
 // ===========================================================================
@@ -1162,7 +1204,14 @@ parse_json_zmm_tape:
 // ===========================================================================
 .Lerror_from_r11:
 .Lerror:
-    xor     eax, eax        // return false
+    mov     al, RESULT_PARSE_ERROR  // return ParseError
+    jmp     .Lepilogue
+
+// ===========================================================================
+// .Ltape_overflow
+// ===========================================================================
+.Ltape_overflow:
+    mov     al, RESULT_TAPE_OVERFLOW  // return TapeOverflow
     jmp     .Lepilogue
 
 // ===========================================================================
