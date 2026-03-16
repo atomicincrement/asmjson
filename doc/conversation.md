@@ -1584,3 +1584,66 @@ visible to new users deciding how to traverse the parsed data.
 28 unit tests + 8 doc-tests (including 2 new README examples) pass.
 
 **Commit**: `e9ce7d8` docs: add optimisation tips — caching TapeRefs from object/array iterators
+
+---
+
+## Session 19 — serde feature: `from_taperef` Deserializer
+
+### What was done
+
+Added a `serde` optional feature that implements `serde::Deserializer<'de>` for
+`TapeRef<'de, 'de>` and exposes a `from_taperef` top-level function.  The
+feature gate is `--features serde`, satisfied by adding an optional serde 1.x
+dependency in `Cargo.toml`.
+
+Files changed:
+
+- `Cargo.toml` — optional `serde = { version = "1", features = ["derive"] }`
+  dependency; `serde` feature entry.
+- `src/tape.rs` — added `pub(crate) fn source_string(&self) -> Option<&'a str>`
+  on `TapeEntry`, which returns the source-JSON-lifetime `&'a str` for plain
+  (non-escaped) `String` entries, enabling zero-copy deserialization.
+- `src/de.rs` — new file containing the full serde integration:
+  - `Error(String)` implementing `serde::de::Error`.
+  - `impl<'de> Deserializer<'de> for TapeRef<'de, 'de>` — full dispatch over
+    every `deserialize_*` method.
+  - `TapeSeqAccess<'de>` (wraps `TapeArrayIter`), `TapeMapAccess<'de>` (wraps
+    `TapeObjectIter`), and `KeyDeserializer<'de>` for borrowed object keys.
+  - `UnitVariantAccess` / `UnitOnly` for string-valued unit enum variants.
+  - `TapeEnumAccess` / `impl VariantAccess for TapeRef` for
+    `{"Variant": payload}` style newtype/struct/tuple enum variants.
+  - `pub fn from_taperef<'de, T: Deserialize<'de>>(r: TapeRef<'de, 'de>) ->
+    Result<T, Error>` as the public entry point.
+- `src/lib.rs` — `#[cfg(feature = "serde")] pub mod de;` and re-export of
+  `from_taperef`.
+
+### Design decisions
+
+**Lifetime unification** — the `Deserializer` impl uses `TapeRef<'de, 'de>`
+(both the tape-borrow and source-JSON lifetimes collapsed to `'de`).  This is
+the common case: the tape and its source string both outlive the deserialization
+scope.  `from_taperef` enforces this through its own signature.
+
+**Zero-copy strings** — plain `String` tape entries (no escape sequences) are
+deserialized via `visit_borrowed_str`, borrowing directly from the source JSON.
+Escaped strings (heap-allocated `Box<str>`) go through `visit_str` and are
+copied into the target type.
+
+**Enum variants** — two strategies are used: a bare JSON string `"Foo"` maps to
+a unit variant (the `TapeRef::deserialize_identifier` path); a single-key
+object `{"Foo": value}` maps to any variant kind (newtype, struct, tuple) via
+`TapeEnumAccess` + `impl VariantAccess for TapeRef`.
+
+**Key deserializer** — `TapeObjectIter` yields `(&'t str, TapeRef)` pairs.
+When both lifetimes are `'de`, the key is already `&'de str` and
+`KeyDeserializer` passes it zero-copy to the visitor via `visit_borrowed_str`.
+
+**`forward_to_deserialize_any!`** — used in `KeyDeserializer` to delegate every
+unneeded `deserialize_*` method to `deserialize_any`, keeping boilerplate
+minimal.
+
+### Results
+
+28 unit tests + 9 doc-tests (including the new `de::from_taperef` doctest) pass.
+
+**Commit**: `9cad231` feat: add serde feature with from_taperef Deserializer for TapeRef
