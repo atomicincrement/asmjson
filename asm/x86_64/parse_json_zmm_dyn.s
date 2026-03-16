@@ -77,9 +77,10 @@
 // Inner-loop register:
 //   rcx  = chunk_offset (0..chunk_len, current bit index within the chunk)
 //
-// State-return register (set before jumping to .Lchunk_fetch):
-//   r10  = address of current state label  (resume after refetch)
-//   r11  = address of EOF handler for current state
+// State-return register (set only when the chunk is exhausted and a refetch
+// is needed; otherwise each transition uses a direct jb .LSTATE):
+//   r10  = address of target state   (loaded only before jmp .Lchunk_fetch)
+//   r11  = address of EOF handler    (always set before any .Lchunk_fetch jump)
 //
 // Scratch: rax, rdx, rsi, rdi, r8, r9  (all caller-saved; free between vtable calls)
 //
@@ -220,13 +221,13 @@ parse_json_zmm_dyn:
 // .Lchunk_fetch  — outer loop: advance pos, classify next 64-byte chunk
 // ===========================================================================
 // On entry:
-//   r10 = resume address (state to jump to after classify)
-//   r11 = EOF address    (what to do if no bytes remain)
+//   r10 = target state   (loaded only from refetch labels or the chunk-exhausted
+//                         fallthrough path; never set on the jb .LSTATE fast path)
+//   r11 = EOF handler    (always set before any jump to .Lchunk_fetch)
 // Clobbers: rax, rdx, rsi, zmm0..zmm6 (implicit), k1..k7 (implicit)
 // On exit: rcx = 0 (chunk_offset), chunk bitmasks written to stack
 .Lchunk_fetch:
-    // Advance pos by chunk_len (0 on first iteration; benign since chunk_len=0 initially
-    // but we initialise pos=0 and call with a fresh r10 directly).
+    // Advance pos by chunk_len (0 on first entry since stack is zeroed).
     mov     rax, qword ptr [rbp + LOC_CHUNK_LEN]
     add     qword ptr [rbp + LOC_POS], rax
 
@@ -324,9 +325,11 @@ parse_json_zmm_dyn:
     add     rdx, rcx
     mov     qword ptr [rbp + LOC_ATOM_START], rdx   // atom_start = pos + chunk_offset
     inc     rcx
-    lea     r10, [rip + .Latom_chars]
     lea     r11, [rip + .Latom_eof_flush]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Latom_chars
+    lea     r10, [rip + .Latom_chars]
+    jmp     .Lchunk_fetch
 
 .Lvw_open_object:
     // frames_buf[frames_depth] = FRAME_OBJECT; frames_depth++
@@ -341,9 +344,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_START_OBJECT]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lobject_start]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lobject_start
+    lea     r10, [rip + .Lobject_start]
+    jmp     .Lchunk_fetch
 
 .Lvw_open_array:
     mov     rax, qword ptr [rbp + LOC_FDEPTH]
@@ -356,9 +361,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_START_ARRAY]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Larray_start]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Larray_start
+    lea     r10, [rip + .Larray_start]
+    jmp     .Lchunk_fetch
 
 .Lvw_open_string:
     // str_start = pos + chunk_offset + 1  (byte after the '"')
@@ -368,9 +375,11 @@ parse_json_zmm_dyn:
     mov     qword ptr [rbp + LOC_STR_START], rax
     mov     byte ptr [rbp + LOC_STR_ESC], 0    // str_escaped = false
     inc     rcx                                 // past the '"'
-    lea     r10, [rip + .Lstring_chars]
     lea     r11, [rip + .Lerror_from_r11]       // EOF mid-string = error
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lstring_chars
+    lea     r10, [rip + .Lstring_chars]
+    jmp     .Lchunk_fetch
 
 .Lrefetch_value_whitespace:
     lea     r10, [rip + .Lvalue_whitespace]
@@ -417,9 +426,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_STRING]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lafter_value]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lafter_value
+    lea     r10, [rip + .Lafter_value]
+    jmp     .Lchunk_fetch
 
 .Lsc_emit_escaped:
     // Owned: call unescape_str(raw_ptr, raw_len, unescape_buf)
@@ -443,17 +454,21 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_ESCAPED_STRING]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lafter_value]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lafter_value
+    lea     r10, [rip + .Lafter_value]
+    jmp     .Lchunk_fetch
 
 .Lsc_escape:
     // '\' found: mark string as escaped, advance past the backslash.
     mov     byte ptr [rbp + LOC_STR_ESC], 1
     inc     rcx                             // past '\' (escaped char follows)
-    lea     r10, [rip + .Lstring_chars]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lstring_chars
+    lea     r10, [rip + .Lstring_chars]
+    jmp     .Lchunk_fetch
 
 .Lrefetch_string_chars:
     lea     r10, [rip + .Lstring_chars]
@@ -495,16 +510,20 @@ parse_json_zmm_dyn:
     movzx   eax, byte ptr [rbp + LOC_STR_ESC]
     mov     byte ptr [rbp + LOC_KEY_ESC], al
     inc     rcx                                // past closing '"'
-    lea     r10, [rip + .Lkey_end]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lkey_end
+    lea     r10, [rip + .Lkey_end]
+    jmp     .Lchunk_fetch
 
 .Lkc_escape:
     mov     byte ptr [rbp + LOC_STR_ESC], 1
     inc     rcx
-    lea     r10, [rip + .Lkey_chars]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lkey_chars
+    lea     r10, [rip + .Lkey_chars]
+    jmp     .Lchunk_fetch
 
 .Lrefetch_key_chars:
     lea     r10, [rip + .Lkey_chars]
@@ -541,9 +560,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_KEY]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lafter_colon]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lafter_colon
+    lea     r10, [rip + .Lafter_colon]
+    jmp     .Lchunk_fetch
 
 .Lke_emit_escaped:
     // Unescape into unescape_buf, then call writer.escaped_key(box_ptr, box_len).
@@ -559,9 +580,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_ESCAPED_KEY]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lafter_colon]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lafter_colon
+    lea     r10, [rip + .Lafter_colon]
+    jmp     .Lchunk_fetch
 
 .Lrefetch_key_end:
     lea     r10, [rip + .Lkey_end]
@@ -595,9 +618,11 @@ parse_json_zmm_dyn:
     add     rdx, rcx
     mov     qword ptr [rbp + LOC_ATOM_START], rdx
     inc     rcx
-    lea     r10, [rip + .Latom_chars]
     lea     r11, [rip + .Latom_eof_flush]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Latom_chars
+    lea     r10, [rip + .Latom_chars]
+    jmp     .Lchunk_fetch
 
 .Lac_open_object:
     mov     rax, qword ptr [rbp + LOC_FDEPTH]
@@ -610,9 +635,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_START_OBJECT]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lobject_start]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lobject_start
+    lea     r10, [rip + .Lobject_start]
+    jmp     .Lchunk_fetch
 
 .Lac_open_array:
     mov     rax, qword ptr [rbp + LOC_FDEPTH]
@@ -625,9 +652,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_START_ARRAY]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Larray_start]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Larray_start
+    lea     r10, [rip + .Larray_start]
+    jmp     .Lchunk_fetch
 
 .Lac_open_string:
     mov     rax, qword ptr [rbp + LOC_POS]
@@ -636,9 +665,11 @@ parse_json_zmm_dyn:
     mov     qword ptr [rbp + LOC_STR_START], rax
     mov     byte ptr [rbp + LOC_STR_ESC], 0
     inc     rcx
-    lea     r10, [rip + .Lstring_chars]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lstring_chars
+    lea     r10, [rip + .Lstring_chars]
+    jmp     .Lchunk_fetch
 
 .Lrefetch_after_colon:
     lea     r10, [rip + .Lafter_colon]
@@ -680,9 +711,11 @@ parse_json_zmm_dyn:
     je      .Lav_comma
     // whitespace delimiter — just an AfterValue transition
     inc     rcx
-    lea     r10, [rip + .Lafter_value]
     lea     r11, [rip + .Leof_after_value]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lafter_value
+    lea     r10, [rip + .Lafter_value]
+    jmp     .Lchunk_fetch
 
 .Lrefetch_atom_chars:
     lea     r10, [rip + .Latom_chars]
@@ -721,9 +754,11 @@ parse_json_zmm_dyn:
     mov     qword ptr [rbp + LOC_STR_START], rax
     mov     byte ptr [rbp + LOC_STR_ESC], 0
     inc     rcx
-    lea     r10, [rip + .Lkey_chars]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lkey_chars
+    lea     r10, [rip + .Lkey_chars]
+    jmp     .Lchunk_fetch
 
 .Los_close_brace:
     // '}' on ObjectStart: valid only if after_comma == false
@@ -742,9 +777,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_END_OBJECT]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lafter_value]
     lea     r11, [rip + .Leof_after_value]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lafter_value
+    lea     r10, [rip + .Lafter_value]
+    jmp     .Lchunk_fetch
 
 .Lrefetch_object_start:
     lea     r10, [rip + .Lobject_start_body]
@@ -782,9 +819,11 @@ parse_json_zmm_dyn:
     add     rdx, rcx
     mov     qword ptr [rbp + LOC_ATOM_START], rdx
     inc     rcx
-    lea     r10, [rip + .Latom_chars]
     lea     r11, [rip + .Latom_eof_flush]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Latom_chars
+    lea     r10, [rip + .Latom_chars]
+    jmp     .Lchunk_fetch
 
 .Las_close_bracket:
     cmp     byte ptr [rbp + LOC_AFT_COMMA], 0
@@ -801,9 +840,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_END_ARRAY]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lafter_value]
     lea     r11, [rip + .Leof_after_value]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lafter_value
+    lea     r10, [rip + .Lafter_value]
+    jmp     .Lchunk_fetch
 
 .Las_open_object:
     mov     rax, qword ptr [rbp + LOC_FDEPTH]
@@ -816,9 +857,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_START_OBJECT]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lobject_start]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lobject_start
+    lea     r10, [rip + .Lobject_start]
+    jmp     .Lchunk_fetch
 
 .Las_open_array:
     mov     rax, qword ptr [rbp + LOC_FDEPTH]
@@ -831,9 +874,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_START_ARRAY]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Larray_start]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Larray_start
+    lea     r10, [rip + .Larray_start]
+    jmp     .Lchunk_fetch
 
 .Las_open_string:
     mov     rax, qword ptr [rbp + LOC_POS]
@@ -842,9 +887,11 @@ parse_json_zmm_dyn:
     mov     qword ptr [rbp + LOC_STR_START], rax
     mov     byte ptr [rbp + LOC_STR_ESC], 0
     inc     rcx
-    lea     r10, [rip + .Lstring_chars]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lstring_chars
+    lea     r10, [rip + .Lstring_chars]
+    jmp     .Lchunk_fetch
 
 .Lrefetch_array_start:
     lea     r10, [rip + .Larray_start_body]
@@ -883,14 +930,18 @@ parse_json_zmm_dyn:
     jmp     .Lerror
 .Lav_comma_obj:
     inc     rcx
-    lea     r10, [rip + .Lobject_start_body]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lobject_start_body
+    lea     r10, [rip + .Lobject_start_body]
+    jmp     .Lchunk_fetch
 .Lav_comma_arr:
     inc     rcx
-    lea     r10, [rip + .Larray_start_body]
     lea     r11, [rip + .Lerror_from_r11]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Larray_start_body
+    lea     r10, [rip + .Larray_start_body]
+    jmp     .Lchunk_fetch
 
 .Lav_close_brace:
     cmp     al, '}'
@@ -907,9 +958,11 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_END_OBJECT]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lafter_value]
     lea     r11, [rip + .Leof_after_value]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lafter_value
+    lea     r10, [rip + .Lafter_value]
+    jmp     .Lchunk_fetch
 
 .Lav_close_bracket:
     cmp     al, ']'
@@ -926,24 +979,16 @@ parse_json_zmm_dyn:
     call    qword ptr [r14 + VTAB_END_ARRAY]
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
-    lea     r10, [rip + .Lafter_value]
     lea     r11, [rip + .Leof_after_value]
-    jmp     .Lcheck_inner_end
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lafter_value
+    lea     r10, [rip + .Lafter_value]
+    jmp     .Lchunk_fetch
 
 .Lrefetch_after_value:
     lea     r10, [rip + .Lafter_value]
     lea     r11, [rip + .Leof_after_value]
     jmp     .Lchunk_fetch
-
-// ===========================================================================
-// .Lcheck_inner_end — central advance/refetch trampoline
-//   On entry: rcx = next chunk_offset, r10 = next state, r11 = EOF handler
-//   If chunk exhausted, fall into .Lchunk_fetch; else jmp r10.
-// ===========================================================================
-.Lcheck_inner_end:
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
-    jae     .Lchunk_fetch
-    jmp     r10
 
 // ===========================================================================
 // .Latom_eof_flush — trailing atom at EOF (e.g., top-level `42` with no newline)

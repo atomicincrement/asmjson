@@ -954,3 +954,36 @@ provided for inspection, benchmarking, and future FFI integration.
 ### Commit
 
 `8cbce74` — asm: add x86_64 AVX-512BW direct-threading JSON parser
+
+### Inline .Lcheck_inner_end — direct jumps to next state
+
+**What was done**: Removed the `.Lcheck_inner_end` trampoline label. The
+trampoline was a shared 4-instruction block (`cmp rcx, chunk_len; jae
+.Lchunk_fetch; jmp r10`) reached by all 26 state-transition sites after
+loading `r10`/`r11`.
+
+Each site was rewritten to:
+
+```asm
+    lea     r11, [rip + .Leof_handler]
+    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    jb      .Lnext_state              ; fast path: direct jump, r10 untouched
+    lea     r10, [rip + .Lnext_state] ; slow path: set r10 for refetch
+    jmp     .Lchunk_fetch
+```
+
+`r10` is now loaded only when the chunk is actually exhausted; the fast
+path jumps directly to the target state without touching `r10` at all.
+The refetch labels (`.Lrefetch_*`) are unchanged since they always feed
+`.Lchunk_fetch` and still set `r10`.
+
+**Design decisions**: The `jb` (jump-if-below) form avoids a negated
+comparison.  `r11` is set unconditionally so that if `.Lchunk_fetch`
+later hits EOF it always has a valid handler, regardless of which path
+was taken.
+
+**Results**: Zero references to `.Lcheck_inner_end` in the file.  File
+grew from 1080 to 1124 lines (net +44 from expanding 26 × 3-line blocks
+to 5 lines each, minus the deleted 10-line trampoline).
+
+**Commit**: `e0e1993` — asm: inline .Lcheck_inner_end; use direct jb to next state
