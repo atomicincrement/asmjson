@@ -34,16 +34,6 @@ cell or pass it through your application rather than calling it on every parse.
 Measured on a single core with `cargo bench` against 10 MiB of synthetic JSON.
 Comparison point is `sonic-rs` (lazy Value, AVX2).
 
-Each benchmark measures **parse + full traversal**: after parsing, every string
-value and object key is visited and its length accumulated.  This is necessary
-for a fair comparison because sonic-rs defers decoding string content until the
-value is accessed (lazy evaluation); a parse-only measurement would undercount
-its work relative to any real use-case where the parsed data is actually read.
-
-Note: simd-json requires a mutable copy of the input buffer to parse in-place,
-so each iteration includes a `Vec::clone` of the 10 MiB dataset; it does not
-start on a level footing with the other parsers on these workloads.
-
 | Parser               | string array | string object | mixed      |
 |----------------------|:------------:|:-------------:|:----------:|
 | asmjson zmm dyn      | 10.93 GiB/s  | 7.50 GiB/s    | 655 MiB/s  |
@@ -67,6 +57,16 @@ The zmm tape parser writes a flat `TapeEntry` array directly in assembly — one
 entry per value — so subsequent traversal is a single linear scan with no
 pointer chasing.  The portable `u64` SWAR classifier beats sonic-rs on string
 objects (4.43 vs 4.05 GiB/s) despite using no SIMD instructions.
+
+Each benchmark measures **parse + full traversal**: after parsing, every string
+value and object key is visited and its length accumulated.  This is necessary
+for a fair comparison because sonic-rs defers decoding string content until the
+value is accessed (lazy evaluation); a parse-only measurement would undercount
+its work relative to any real use-case where the parsed data is actually read.
+
+Note: simd-json requires a mutable copy of the input buffer to parse in-place,
+so each iteration includes a `Vec::clone` of the 10 MiB dataset; it does not
+start on a level footing with the other parsers on these workloads.
 
 ## Optimisation tips
 
