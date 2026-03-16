@@ -987,3 +987,45 @@ grew from 1080 to 1124 lines (net +44 from expanding 26 × 3-line blocks
 to 5 lines each, minus the deleted 10-line trampoline).
 
 **Commit**: `e0e1993` — asm: inline .Lcheck_inner_end; use direct jb to next state
+
+---
+
+## Session 5 — Rust entrypoint for the zmm-dyn assembly parser
+
+### Adding `parse_to_tape_zmm_dyn`
+
+**What was done**: Added a public Rust function `parse_to_tape_zmm_dyn<'a>(src: &'a str) -> Option<Tape<'a>>` that drives the hand-written AVX-512BW assembly parser (`parse_json_zmm_dyn`) and returns the same `Tape` type as the pure-Rust entrypoints.
+
+The work spanned several sub-problems that had to be solved before the doctest `assert_eq!(tape.root().get("x").as_i64(), Some(1))` passed.
+
+### Build system: compiling the assembly
+
+A `build.rs` was created to compile `asm/x86_64/parse_json_zmm_dyn.S` with the `cc` crate (added to `[build-dependencies]`).  The `.s` file was renamed to `.S` (uppercase) so that the C pre-processor runs first and strips `//` comments before GAS assembles the file — GAS in AT&T mode treats `//` as division.
+
+### Assembly correctness fixes
+
+Three assembly bugs were found and fixed before turning to the Rust side:
+
+1. **Three-register addressing**: GAS does not allow `[r12+rax+rcx]` in Intel syntax.  Nine sites were fixed with `add rax, r12` followed by the two-register form.
+2. **Wrong shift register**: `shl rax, cl` used `cl` (the chunk-offset byte of `rcx`) instead of the chunk length from `rsi`.  Fixed by inserting `mov ecx, esi` before the shift.
+3. **Uninitialised `LOC_CHUNK_LEN`**: The first call to `.Lchunk_fetch` read an uninitialised stack slot.  Fixed by zero-initialising it in the prologue.
+
+### Replacing the raw Rust dyn-vtable with a stable C-ABI vtable
+
+**Design decisions**: The initial approach passed a raw Rust `dyn JsonWriter` fat-pointer vtable to the assembly, which assumed fixed byte offsets (24, 32, 40, …) for each method.  Rust's `dyn` vtable layout is implementation-defined (the header contains size, align, and a destructor before the first method slot), so those offsets are unstable and differed from reality.
+
+The fix replaces the raw vtable with a `#[repr(C)] struct ZmmVtab` whose eleven fields are `unsafe extern "C"` function pointers at predictable 8-byte-aligned offsets (0, 8, 16, …).  Rust fills this struct on the stack with concrete trampoline functions, and the assembly uses matching `.equ VTAB_*` constants starting at 0.
+
+Each trampoline casts `data: *mut ()` to `*mut TapeWriter<'static>` (the `'static` is a white-lie required because `extern "C"` functions cannot carry generic lifetime parameters; safety is upheld because the writer and source JSON both outlive the assembly call).  Trampolines for `escaped_string` and `escaped_key` copy the unescaped bytes into a fresh `Box<str>` to give proper ownership semantics.
+
+All raw-pointer dereferences are wrapped in `unsafe {}` blocks to satisfy the Rust 2024 `unsafe_op_in_unsafe_fn` requirement.
+
+### Fixing r8/r9 clobbering in `.Lemit_atom`
+
+**What was done**: In `.Lea_number`, the atom pointer and length were saved into `r8`/`r9` before calling `is_valid_json_number_c`.  Both registers are caller-saved and were clobbered by the call, so the subsequent `mov rsi, r8 / mov rdx, r9` loaded garbage, causing the number vtable method to receive wrong arguments.
+
+Fixed by saving pointer and length to the stack (`LOC_ATOM_START` / `LOC_STR_START`, which are stale at this point) and reloading from those slots after the validation call.
+
+**Results**: All 18 unit tests and 5 doctests pass with zero warnings.  The doctest `assert_eq!(tape.root().get("x").as_i64(), Some(1))` passes correctly.
+
+**Commit**: `944d97f` — feat: add parse_to_tape_zmm_dyn Rust entrypoint with C-ABI vtable
