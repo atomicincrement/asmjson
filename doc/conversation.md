@@ -888,3 +888,69 @@ still producing a proper `Box<str>` for the `TapeEntry`.
 
 All 18 unit tests and 4 doc-tests pass.  The hot path (no escape sequences)
 now allocates zero bytes inside `parse_json_impl` itself.
+
+
+---
+
+## Session 3 — Hand-written AVX-512BW assembly translation
+
+### What was done
+
+Created `asm/x86_64/parse_json_zmm_dyn.s` — a complete hand-written GNU
+assembler translation of the `parse_json_impl` state machine.
+
+Two preparatory changes were also made to `src/lib.rs`:
+
+- `FrameKind` received `#[repr(u8)]` with explicit discriminants
+  `Object = 0` and `Array = 1`, giving a stable ABI for the assembly.
+- A thin `is_valid_json_number_c` wrapper was added with
+  `#[unsafe(no_mangle)] pub extern "C"` linkage so it can be called from
+  assembly without name-mangling.
+
+### Design decisions
+
+**Direct threading** — each state ends with an unconditional `jmp` to the
+next state label.  No integer state variable is stored anywhere; the
+program counter encodes the state.  A pair of registers (`r10` = resume
+address, `r11` = EOF-handler address) is loaded just before every
+`jmp .Lchunk_fetch`, so the shared fetch block can service every state
+with a final `jmp r10`.
+
+**Inlined classify_zmm** — the AVX-512BW classification (six
+`vpcmpub`/`vpcmpeqb` instructions + three `korq` merges + four `kmovq`
+extracts) is inlined at `.Lchunk_fetch`.  Constants live in `.rodata` as
+six 64-byte lanes matching the `ByteStateConstants` layout.
+
+**Register allocation** — five callee-saved GP registers carry persistent
+state across the entire function:
+
+| Register | Purpose |
+|----------|---------|
+| `rbx`    | writer data pointer (fat-ptr data half) |
+| `r12`    | `src_base` |
+| `r13`    | `src_end` |
+| `r14`    | writer vtable pointer (fat-ptr vtable half) |
+| `r15`    | `frames_buf` (`&mut [u8; 64]`) |
+
+`rcx` holds `chunk_offset` inside the inner loop and is saved to
+`[rbp-168]` (LOC_COFF) across every vtable call.
+
+**Vtable offsets** — the 15-entry `dyn JsonWriter` vtable is documented
+at the top of the file with byte offsets +0 through +112, derived from the
+Rust fat-pointer convention (drop/size/align first, then methods in
+declaration order).
+
+**EOF handling** — each state provides its own `r11` EOF target set just
+before the refetch jump.  States where EOF is legal (top-level whitespace,
+after a complete value) land at `.Leof_after_value`; all others land at
+`.Lerror`.
+
+### Results
+
+All 18 unit tests and 4 doc-tests continue to pass after `cargo fmt &&
+cargo test`.  The assembly file is not yet linked into the crate but is
+provided for inspection, benchmarking, and future FFI integration.
+
+### Commit
+
+`8cbce74` — asm: add x86_64 AVX-512BW direct-threading JSON parser

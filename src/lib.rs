@@ -131,9 +131,10 @@ enum State {
 // ---------------------------------------------------------------------------
 
 #[derive(Copy, Clone, PartialEq)]
+#[repr(u8)]
 enum FrameKind {
-    Object,
-    Array,
+    Object = 0,
+    Array = 1,
 }
 
 /// Maximum supported JSON nesting depth (objects + arrays combined).
@@ -232,6 +233,14 @@ fn is_valid_json_number(s: &[u8]) -> bool {
         }
     }
     i == n
+}
+
+/// C-linkage entry point for the hand-written assembly parser.
+/// Returns 1 if `bytes[..len]` is a valid JSON number, 0 otherwise.
+#[unsafe(no_mangle)]
+pub extern "C" fn is_valid_json_number_c(ptr: *const u8, len: usize) -> bool {
+    let s = unsafe { std::slice::from_raw_parts(ptr, len) };
+    is_valid_json_number(s)
 }
 
 fn write_atom<'a, W: JsonWriter<'a>>(s: &'a str, w: &mut W) -> bool {
