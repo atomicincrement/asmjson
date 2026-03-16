@@ -1316,3 +1316,126 @@ outside a `Tape` (e.g. constructed in tests).
 All 27 unit tests and 6 doctests pass.
 
 **Commit**: `3ec8fba` -- perf: skip TapeEntry drops via Tape::has_escapes flag
+
+## Session 11 — SWAR digit fast path for short numbers
+
+### What was done
+
+Profiling showed ~7 % of cycles in `is_valid_json_number` + `is_valid_json_number_c`.
+The vast majority of numbers in twitter-like JSON are plain integers up to 8 bytes
+(e.g., `"id": 12345678`).  These can be validated without a function call by using
+SWAR (SIMD Within A Register) bit tricks inside `.Lemit_atom`.
+
+The fast path is applied in both `parse_json_zmm_tape.S` and `parse_json_zmm_dyn.S`.
+
+### Design: SWAR all-digits check
+
+For each byte b in the loaded qword, the check exploits the layout of ASCII digits
+('0' = 0x30 .. '9' = 0x39):
+
+```
+t = (b | 0x80) - 0x30
+
+Lower bound (b >= '0'):  bit 7 of t = 1
+  Setting the top bit ensures (b|0x80) >= 0x80.  For b >= 0x30 the subtraction
+  0xB0..0xBF - 0x30 = 0x80..0x8F leaves bit 7 set.  For b < 0x30 the result
+  drops to at most 0x7F (top bit clear) -- the borrow has consumed bit 7.
+
+Upper bound (b <= '9'):  (t + 0x06) & 0x10 == 0
+  A digit gives t-byte = 0x80..0x89; adding 0x06 = 0x86..0x8F, bit 4 clear.
+  A byte > '9' gives t-byte >= 0x8A; adding 0x06 >= 0x90, bit 4 set.
+```
+
+Whole-word check:
+
+```asm
+  mov  r10, 0x8080808080808080
+  or   r10, rax                 ; set top bit per byte
+  mov  r11, 0x3030303030303030
+  sub  r10, r11                 ; t = (b|0x80)-0x30 per byte
+  ; lower bound
+  mov  r11, r10 / not r11
+  mov  rax, 0x8080808080808080
+  test r11, rax                 ; ZF=1 => all bytes >= '0'
+  ; upper bound
+  mov  r11, 0x0606060606060606
+  add  r10, r11
+  mov  r11, 0x1010101010101010
+  test r10, r11                 ; ZF=1 => all bytes <= '9'
+```
+
+Note: `sub`/`add`/`test` cannot encode 64-bit immediates on x86-64 (max 32-bit
+sign-extended).  Large constants are loaded into a register via `mov r64, imm64`
+first.
+
+### Algorithm
+
+1. If `rdx > 8`: always use full validator (atom doesn't fit in a qword).
+2. If `rsi + 8 > src_end`: fewer than 8 bytes remain in source buffer -- safe
+   to load only `rdx` bytes, but need padding; fall back to validator instead.
+3. Leading-zero guard: if first byte is '0' and `rdx > 1`, fall back to
+   validator (would otherwise accept invalid "01", "007", etc.).
+4. Load 8 bytes from `rsi`; fill the `8 - rdx` unused high bytes with '0'
+   (0x30) using a shift-derived mask, so they vacuously pass the digit check.
+5. SWAR check.  If all bytes are digits: write Number entry directly.
+6. Otherwise: call `is_valid_json_number_c` (handles '-', '.', 'e', leading
+   zeros, etc.).
+
+### Results
+
+All 27 unit tests pass, including new boundary tests:
+- Pure integers 1--8 bytes long hit the fast path and match the dyn reference.
+- A 9-byte integer ("123456789") correctly falls through to the full validator.
+- Leading-zero inputs ("01", "00", "007", "01234567") are still rejected.
+
+**Commit**: `bae1632` -- perf: SWAR digit fast path for short numbers in .Lemit_atom
+
+## Session 12 — perf profile and NT-store experiment
+
+### Profiling zmm_tape
+
+Ran `perf record -g --call-graph dwarf` on `perf_zmm_tape` (400 iterations of
+~10 MiB mixed JSON).  Flat profile (self %):
+
+| Symbol | Self% |
+|---|---|
+| `parse_json_zmm_tape` | 59.4 % |
+| `asmjson::is_valid_json_number` | 1.3 % |
+| `is_valid_json_number_c` | 0.6 % |
+| all allocator / drop | ~0 % |
+
+Inside the parser the profile is very flat — no instruction exceeds 2 %.
+The three hottest instructions (~1.9 % combined) are the `mov %r10,(%rax)` tape
+entry tag stores.  Number validation after the SWAR fast path is now ~2 % total.
+Memory/drop overhead is effectively zero thanks to `has_escapes`.
+
+### NT store experiment
+
+Replaced every tape entry write (`mov qword ptr [rax], r10` and
+`mov qword ptr [rax + 8], ...`) with `movnti` (non-temporal store), which
+bypasses the cache on write.  Added `sfence` before the function `ret`.
+
+**Result: 3–5 % regression on all three bench workloads.**
+
+Reason: the benchmark iterates over ~1 MiB of JSON many times.  The tape fits
+in L3 cache.  With regular stores the L3 is warm when `tape_sum_lens` traverses
+the tape immediately after parsing; with `movnti` the traversal refetches from
+DRAM.  NT stores are appropriate only when the working set exceeds L3 (large
+one-shot streams where the tape would be evicted before the consumer reads it).
+
+The commit was reverted (`0673d7d`).
+
+### Design decision
+
+Non-temporal stores are a context-dependent trade-off:
+
+- **Beneficial**: streaming workloads with tapes larger than L3 (e.g., multi-MB
+  one-shot document ingestion) where write and read are separated by enough work
+  or time to cause natural eviction.
+- **Harmful**: small/medium JSON or repeated parsing where the tape stays hot in
+  L3 (as in the criterion bench).
+
+No further action taken; existing `mov` stores are optimal for the benchmark
+profile.
+
+**Commits**: `e9bf4e1` NT stores (then `0673d7d` revert)
