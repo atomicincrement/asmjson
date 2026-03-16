@@ -1,7 +1,5 @@
 #![doc = include_str!("../README.md")]
 
-use std::borrow::Cow;
-
 pub mod json_ref;
 pub mod tape;
 
@@ -132,10 +130,14 @@ enum State {
 // the writer implementations below.
 // ---------------------------------------------------------------------------
 
+#[derive(Copy, Clone, PartialEq)]
 enum FrameKind {
     Object,
     Array,
 }
+
+/// Maximum supported JSON nesting depth (objects + arrays combined).
+pub const MAX_JSON_DEPTH: usize = 64;
 
 // ---------------------------------------------------------------------------
 // JsonWriter trait — SAX-style event sink
@@ -159,10 +161,14 @@ pub trait JsonWriter<'src> {
     fn bool_val(&mut self, v: bool);
     /// A JSON number; `s` is a slice of the original source string.
     fn number(&mut self, s: &'src str);
-    /// A JSON string value (borrowed when escape-free, owned otherwise).
-    fn string(&mut self, s: Cow<'src, str>);
-    /// An object key; always immediately followed by the key's value events.
-    fn key(&mut self, s: Cow<'src, str>);
+    /// A JSON string value with no escape sequences; `s` borrows from the source.
+    fn string(&mut self, s: &'src str);
+    /// A JSON string value that contained escape sequences; `s` is the decoded text.
+    fn escaped_string(&mut self, s: Box<str>);
+    /// An object key with no escape sequences; `s` borrows from the source.
+    fn key(&mut self, s: &'src str);
+    /// An object key that contained escape sequences; `s` is the decoded text.
+    fn escaped_key(&mut self, s: Box<str>);
     /// Opening `{` of an object.
     fn start_object(&mut self);
     /// Closing `}` of an object.
@@ -283,20 +289,29 @@ pub fn parse_with<'a, W: JsonWriter<'a>>(
     classify: ClassifyFn,
     writer: W,
 ) -> Option<W::Output> {
-    parse_json_impl(src, classify, writer)
+    let mut frames_buf = [FrameKind::Object; MAX_JSON_DEPTH];
+    let mut unescape_buf = String::new();
+    parse_json_impl(src, classify, writer, &mut frames_buf, &mut unescape_buf)
 }
 
-fn parse_json_impl<'a, F, W>(src: &'a str, classify: F, mut writer: W) -> Option<W::Output>
+fn parse_json_impl<'a, F, W>(
+    src: &'a str,
+    classify: F,
+    mut writer: W,
+    frames_buf: &mut [FrameKind; MAX_JSON_DEPTH],
+    unescape_buf: &mut String,
+) -> Option<W::Output>
 where
     F: Fn(&[u8]) -> ByteState,
     W: JsonWriter<'a>,
 {
     let bytes = src.as_bytes();
-    let mut frames: Vec<FrameKind> = Vec::new();
+    let mut frames_depth: usize = 0;
     let mut str_start: usize = 0; // absolute byte offset of char after opening '"'
     let mut str_escaped = false; // true if the current string contained a backslash escape
     let mut atom_start: usize = 0; // absolute byte offset of first atom byte
-    let mut current_key: Cow<'a, str> = Cow::Borrowed(""); // key slice captured when KeyChars closes
+    let mut current_key_raw: &'a str = ""; // raw key slice captured when KeyChars closes
+    let mut current_key_escaped = false; // true when the key contained backslash escapes
     let mut after_comma = false; // true when ObjectStart/ArrayStart was reached via a `,`
     let mut state = State::ValueWhitespace;
 
@@ -320,14 +335,24 @@ where
                     let byte = chunk[chunk_offset];
                     match byte {
                         b'{' => {
-                            frames.push(FrameKind::Object);
-                            writer.start_object();
-                            State::ObjectStart
+                            if frames_depth >= MAX_JSON_DEPTH {
+                                State::Error
+                            } else {
+                                frames_buf[frames_depth] = FrameKind::Object;
+                                frames_depth += 1;
+                                writer.start_object();
+                                State::ObjectStart
+                            }
                         }
                         b'[' => {
-                            frames.push(FrameKind::Array);
-                            writer.start_array();
-                            State::ArrayStart
+                            if frames_depth >= MAX_JSON_DEPTH {
+                                State::Error
+                            } else {
+                                frames_buf[frames_depth] = FrameKind::Array;
+                                frames_depth += 1;
+                                writer.start_array();
+                                State::ArrayStart
+                            }
                         }
                         b'"' => {
                             str_start = pos + chunk_offset + 1;
@@ -355,12 +380,12 @@ where
                         b'\\' => State::StringEscape,
                         b'"' => {
                             let raw = &src[str_start..pos + chunk_offset];
-                            let cow = if str_escaped {
-                                Cow::Owned(unescape_str(raw))
+                            if str_escaped {
+                                unescape_str(raw, unescape_buf);
+                                writer.escaped_string(unescape_buf.as_str().into());
                             } else {
-                                Cow::Borrowed(raw)
-                            };
-                            writer.string(cow);
+                                writer.string(raw);
+                            }
                             State::AfterValue
                         }
                         _ => State::StringChars,
@@ -385,12 +410,8 @@ where
                     match byte {
                         b'\\' => State::KeyEscape,
                         b'"' => {
-                            let raw = &src[str_start..pos + chunk_offset];
-                            current_key = if str_escaped {
-                                Cow::Owned(unescape_str(raw))
-                            } else {
-                                Cow::Borrowed(raw)
-                            };
+                            current_key_raw = &src[str_start..pos + chunk_offset];
+                            current_key_escaped = str_escaped;
                             State::KeyEnd
                         }
                         _ => State::KeyChars,
@@ -412,7 +433,12 @@ where
                     let byte = chunk[chunk_offset];
                     match byte {
                         b':' => {
-                            writer.key(std::mem::replace(&mut current_key, Cow::Borrowed("")));
+                            if current_key_escaped {
+                                unescape_str(current_key_raw, unescape_buf);
+                                writer.escaped_key(unescape_buf.as_str().into());
+                            } else {
+                                writer.key(current_key_raw);
+                            }
                             State::AfterColon
                         }
                         _ => State::Error,
@@ -429,14 +455,24 @@ where
                     let byte = chunk[chunk_offset];
                     match byte {
                         b'{' => {
-                            frames.push(FrameKind::Object);
-                            writer.start_object();
-                            State::ObjectStart
+                            if frames_depth >= MAX_JSON_DEPTH {
+                                State::Error
+                            } else {
+                                frames_buf[frames_depth] = FrameKind::Object;
+                                frames_depth += 1;
+                                writer.start_object();
+                                State::ObjectStart
+                            }
                         }
                         b'[' => {
-                            frames.push(FrameKind::Array);
-                            writer.start_array();
-                            State::ArrayStart
+                            if frames_depth >= MAX_JSON_DEPTH {
+                                State::Error
+                            } else {
+                                frames_buf[frames_depth] = FrameKind::Array;
+                                frames_depth += 1;
+                                writer.start_array();
+                                State::ArrayStart
+                            }
                         }
                         b'"' => {
                             str_start = pos + chunk_offset + 1;
@@ -463,31 +499,44 @@ where
                         State::Error
                     } else {
                         match byte {
-                            b'}' => match frames.pop() {
-                                Some(FrameKind::Object) => {
+                            b'}' => {
+                                if frames_depth == 0
+                                    || frames_buf[frames_depth - 1] != FrameKind::Object
+                                {
+                                    State::Error
+                                } else {
+                                    frames_depth -= 1;
                                     writer.end_object();
                                     State::AfterValue
                                 }
-                                _ => State::Error,
-                            },
-                            b']' => match frames.pop() {
-                                Some(FrameKind::Array) => {
+                            }
+                            b']' => {
+                                if frames_depth == 0
+                                    || frames_buf[frames_depth - 1] != FrameKind::Array
+                                {
+                                    State::Error
+                                } else {
+                                    frames_depth -= 1;
                                     writer.end_array();
                                     State::AfterValue
                                 }
-                                _ => State::Error,
-                            },
-                            b',' => match frames.last() {
-                                Some(FrameKind::Array) => {
-                                    after_comma = true;
-                                    State::ArrayStart
+                            }
+                            b',' => {
+                                if frames_depth == 0 {
+                                    State::Error
+                                } else {
+                                    match frames_buf[frames_depth - 1] {
+                                        FrameKind::Array => {
+                                            after_comma = true;
+                                            State::ArrayStart
+                                        }
+                                        FrameKind::Object => {
+                                            after_comma = true;
+                                            State::ObjectStart
+                                        }
+                                    }
                                 }
-                                Some(FrameKind::Object) => {
-                                    after_comma = true;
-                                    State::ObjectStart
-                                }
-                                None => State::Error,
-                            },
+                            }
                             _ => State::AfterValue, // whitespace delimiter
                         }
                     }
@@ -514,14 +563,14 @@ where
                         b'}' => {
                             if after_comma {
                                 State::Error
+                            } else if frames_depth > 0
+                                && frames_buf[frames_depth - 1] == FrameKind::Object
+                            {
+                                frames_depth -= 1;
+                                writer.end_object();
+                                State::AfterValue
                             } else {
-                                match frames.pop() {
-                                    Some(FrameKind::Object) => {
-                                        writer.end_object();
-                                        State::AfterValue
-                                    }
-                                    _ => State::Error,
-                                }
+                                State::Error
                             }
                         }
                         _ => State::Error,
@@ -541,27 +590,37 @@ where
                         b']' => {
                             if after_comma {
                                 State::Error
+                            } else if frames_depth > 0
+                                && frames_buf[frames_depth - 1] == FrameKind::Array
+                            {
+                                frames_depth -= 1;
+                                writer.end_array();
+                                State::AfterValue
                             } else {
-                                match frames.pop() {
-                                    Some(FrameKind::Array) => {
-                                        writer.end_array();
-                                        State::AfterValue
-                                    }
-                                    _ => State::Error,
-                                }
+                                State::Error
                             }
                         }
                         b'{' => {
                             after_comma = false;
-                            frames.push(FrameKind::Object);
-                            writer.start_object();
-                            State::ObjectStart
+                            if frames_depth >= MAX_JSON_DEPTH {
+                                State::Error
+                            } else {
+                                frames_buf[frames_depth] = FrameKind::Object;
+                                frames_depth += 1;
+                                writer.start_object();
+                                State::ObjectStart
+                            }
                         }
                         b'[' => {
                             after_comma = false;
-                            frames.push(FrameKind::Array);
-                            writer.start_array();
-                            State::ArrayStart
+                            if frames_depth >= MAX_JSON_DEPTH {
+                                State::Error
+                            } else {
+                                frames_buf[frames_depth] = FrameKind::Array;
+                                frames_depth += 1;
+                                writer.start_array();
+                                State::ArrayStart
+                            }
                         }
                         b'"' => {
                             after_comma = false;
@@ -587,31 +646,42 @@ where
                     }
                     let byte = chunk[chunk_offset];
                     match byte {
-                        b',' => match frames.last() {
-                            Some(FrameKind::Object) => {
-                                after_comma = true;
-                                State::ObjectStart
+                        b',' => {
+                            if frames_depth == 0 {
+                                State::Error
+                            } else {
+                                match frames_buf[frames_depth - 1] {
+                                    FrameKind::Object => {
+                                        after_comma = true;
+                                        State::ObjectStart
+                                    }
+                                    FrameKind::Array => {
+                                        after_comma = true;
+                                        State::ArrayStart
+                                    }
+                                }
                             }
-                            Some(FrameKind::Array) => {
-                                after_comma = true;
-                                State::ArrayStart
-                            }
-                            None => State::Error,
-                        },
-                        b'}' => match frames.pop() {
-                            Some(FrameKind::Object) => {
+                        }
+                        b'}' => {
+                            if frames_depth > 0 && frames_buf[frames_depth - 1] == FrameKind::Object
+                            {
+                                frames_depth -= 1;
                                 writer.end_object();
                                 State::AfterValue
+                            } else {
+                                State::Error
                             }
-                            _ => State::Error,
-                        },
-                        b']' => match frames.pop() {
-                            Some(FrameKind::Array) => {
+                        }
+                        b']' => {
+                            if frames_depth > 0 && frames_buf[frames_depth - 1] == FrameKind::Array
+                            {
+                                frames_depth -= 1;
                                 writer.end_array();
                                 State::AfterValue
+                            } else {
+                                State::Error
                             }
-                            _ => State::Error,
-                        },
+                        }
                         _ => State::Error,
                     }
                 }
@@ -635,7 +705,7 @@ where
     }
 
     // Unclosed objects or arrays.
-    if !frames.is_empty() {
+    if frames_depth != 0 {
         return None;
     }
 
@@ -643,14 +713,15 @@ where
 }
 
 /// Decode all JSON string escape sequences within `s` (the raw content between
-/// the opening and closing quotes, with no surrounding quotes).  Returns the
-/// decoded `String`.
+/// the opening and closing quotes, with no surrounding quotes).  Clears `out`
+/// and writes the decoded text into it.
 ///
 /// Supported escapes: `\"` `\\` `\/` `\b` `\f` `\n` `\r` `\t` `\uXXXX`
 /// (including surrogate pairs).  Unknown escapes are passed through verbatim.
+#[unsafe(no_mangle)]
 #[inline(never)]
-fn unescape_str(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
+pub fn unescape_str(s: &str, out: &mut String) {
+    out.clear();
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -737,7 +808,6 @@ fn unescape_str(s: &str) -> String {
             }
         }
     }
-    out
 }
 
 /// Per-chunk classification masks produced by the classifier functions.

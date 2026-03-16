@@ -138,10 +138,10 @@ impl<'t, 'src: 't> JsonRef<'t> for TapeRef<'t, 'src> {
     }
 
     fn as_str(self) -> Option<&'t str> {
-        if let TapeEntry::String(s) = &self.tape[self.pos] {
-            Some(s.as_ref())
-        } else {
-            None
+        match &self.tape[self.pos] {
+            TapeEntry::String(s) => Some(s),
+            TapeEntry::EscapedString(s) => Some(s.as_ref()),
+            _ => None,
         }
     }
 
@@ -152,18 +152,19 @@ impl<'t, 'src: 't> JsonRef<'t> for TapeRef<'t, 'src> {
         };
         let mut i = self.pos + 1;
         while i < end_idx {
-            if let TapeEntry::Key(k) = &self.tape[i] {
-                let val_pos = i + 1;
-                if k.as_ref() == key {
-                    return Some(TapeRef {
-                        tape: self.tape,
-                        pos: val_pos,
-                    });
-                }
-                i = tape_skip(self.tape, val_pos);
-            } else {
-                break;
+            let k_str: &str = match &self.tape[i] {
+                TapeEntry::Key(k) => k,
+                TapeEntry::EscapedKey(k) => k.as_ref(),
+                _ => break,
+            };
+            let val_pos = i + 1;
+            if k_str == key {
+                return Some(TapeRef {
+                    tape: self.tape,
+                    pos: val_pos,
+                });
             }
+            i = tape_skip(self.tape, val_pos);
         }
         None
     }

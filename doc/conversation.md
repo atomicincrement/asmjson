@@ -786,3 +786,105 @@ variants were removed.
 ### Commit
 
 `63d6957` bench: update README with March 2026 results (asmjson leads sonic-rs)
+
+## Session — TapeEntry: split Cow into borrowed + escaped variants
+
+### What was done
+
+Replaced the two `Cow<'a, str>` payload variants in `TapeEntry`:
+
+| Before | After |
+|--------|-------|
+| `String(Cow<'a, str>)` | `String(&'a str)` + `EscapedString(Box<str>)` |
+| `Key(Cow<'a, str>)` | `Key(&'a str)` + `EscapedKey(Box<str>)` |
+
+`TapeWriter::string` / `TapeWriter::key` now branch on the `Cow` variant from
+the parser: `Borrowed` goes into the plain variant; `Owned` (escape-decoded)
+is converted to `Box<str>` and stored in the `Escaped*` variant.
+
+`TapeObjectIter`, `json_ref::as_str`, and `json_ref::get` were extended to
+match both the plain and escaped variants.
+
+### Design decisions
+
+`Box<str>` (ptr + len = 16 bytes) was chosen over `String` (ptr + len + cap =
+24 bytes) because the decoded string is never grown after allocation; dropping
+the capacity word is the right trade-off.
+
+An alternative was to keep `Cow` on the `JsonWriter` trait and only change
+`TapeEntry`.  This was the approach taken: the trait signature is untouched,
+keeping the door open for alternative `JsonWriter` impls that may prefer the
+`Cow` abstraction.
+
+### Results
+
+`size_of::<TapeEntry>()` reduced from **32 bytes** to **24 bytes** (25%
+reduction).  All 18 unit tests and 4 doc-tests continue to pass.
+
+## Session — JsonWriter: replace Cow methods with string/escaped_string and key/escaped_key
+
+### What was done
+
+Split the two `Cow`-taking methods on the `JsonWriter` trait into four
+explicit methods:
+
+| Before | After |
+|--------|-------|
+| `fn string(&mut self, s: Cow<'src, str>)` | `fn string(&mut self, s: &'src str)` |
+| | `fn escaped_string(&mut self, s: Box<str>)` |
+| `fn key(&mut self, s: Cow<'src, str>)` | `fn key(&mut self, s: &'src str)` |
+| | `fn escaped_key(&mut self, s: Box<str>)` |
+
+`parse_json_impl` now dispatches directly on the `str_escaped` flag and calls
+the appropriate method instead of allocating a `Cow`.  The `current_key: Cow`
+local was replaced by `current_key_raw: &'a str` + `current_key_escaped: bool`.
+The `use std::borrow::Cow` import was removed from `lib.rs`.
+
+`TapeWriter` was simplified to four one-liner push calls.
+
+### Design decisions
+
+Having separate methods at the trait level means `JsonWriter` implementors no
+longer need to import or pattern-match `Cow`.  A `Box<str>` is the minimal
+allocation for the decoded text (no spare capacity), consistent with the
+`TapeEntry` representation.
+
+### Results
+
+All 18 unit tests and 4 doc-tests continue to pass.
+
+## Session — Zero-allocation parse_json_impl fast path
+
+### What was done
+
+Eliminated the two remaining heap allocations from the non-escaping path of
+`parse_json_impl`:
+
+**Frames stack**: replaced `Vec<FrameKind>` with a caller-supplied
+`&mut [FrameKind; 64]` and a `frames_depth: usize` cursor.  `push` / `pop` /
+`last` / `is_empty` are now simple array-index operations.  Nesting beyond 64
+levels returns `State::Error`.  `FrameKind` gained `#[derive(Copy, Clone,
+PartialEq)]` to enable the array semantics.
+
+**Unescape buffer**: replaced the `unescape_str(s) -> String` helper
+(which allocated a fresh `String` then a second time for `into_boxed_str`)
+with `unescape_str(s, out: &mut String)` that reuses a caller-supplied buffer.
+Each escaped value now performs exactly one allocation (`Box::from(buf.as_str())`).
+
+`parse_with` (the public entry point) allocates both resources on its own
+stack frame and passes them down, so the public API is unchanged.
+
+`unescape_str` is now `#[unsafe(no_mangle)]` + `#[inline(never)]` and `pub`,
+giving it a stable C-linkage symbol for profiling or external calls.
+
+### Design decisions
+
+64 levels of nesting covers all realistic JSON; deeply-nested pathological
+inputs are rejected as errors.  The `String` reuse avoids the
+`String::with_capacity` allocation on every escape-containing token while
+still producing a proper `Box<str>` for the `TapeEntry`.
+
+### Results
+
+All 18 unit tests and 4 doc-tests pass.  The hot path (no escape sequences)
+now allocates zero bytes inside `parse_json_impl` itself.

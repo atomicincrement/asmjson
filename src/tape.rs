@@ -1,5 +1,3 @@
-use std::borrow::Cow;
-
 use crate::JsonWriter;
 
 // ---------------------------------------------------------------------------
@@ -17,10 +15,14 @@ pub enum TapeEntry<'a> {
     Bool(bool),
     /// A number token; the slice borrows directly from the source string.
     Number(&'a str),
-    /// A string value; borrowed when no escapes were present, owned otherwise.
-    String(Cow<'a, str>),
-    /// An object key; always immediately followed by the key's value entry/entries.
-    Key(Cow<'a, str>),
+    /// A string value with no escape sequences; borrowed directly from the source.
+    String(&'a str),
+    /// A string value that contained escape sequences; owns the decoded text.
+    EscapedString(Box<str>),
+    /// An object key with no escape sequences; borrowed directly from the source.
+    Key(&'a str),
+    /// An object key that contained escape sequences; owns the decoded text.
+    EscapedKey(Box<str>),
     /// Start of an object; payload is the index of the matching [`TapeEntry::EndObject`].
     StartObject(usize),
     EndObject,
@@ -75,11 +77,17 @@ impl<'a> JsonWriter<'a> for TapeWriter<'a> {
     fn number(&mut self, s: &'a str) {
         self.entries.push(TapeEntry::Number(s));
     }
-    fn string(&mut self, s: Cow<'a, str>) {
+    fn string(&mut self, s: &'a str) {
         self.entries.push(TapeEntry::String(s));
     }
-    fn key(&mut self, s: Cow<'a, str>) {
+    fn escaped_string(&mut self, s: Box<str>) {
+        self.entries.push(TapeEntry::EscapedString(s));
+    }
+    fn key(&mut self, s: &'a str) {
         self.entries.push(TapeEntry::Key(s));
+    }
+    fn escaped_key(&mut self, s: Box<str>) {
+        self.entries.push(TapeEntry::EscapedKey(s));
     }
     fn start_object(&mut self) {
         let idx = self.entries.len();
@@ -182,20 +190,20 @@ impl<'t, 'src: 't> Iterator for TapeObjectIter<'t, 'src> {
         if self.pos >= self.end {
             return None;
         }
-        if let TapeEntry::Key(k) = &self.tape[self.pos] {
-            let key: &'t str = k.as_ref();
-            let val_pos = self.pos + 1;
-            self.pos = tape_skip(self.tape, val_pos);
-            Some((
-                key,
-                TapeRef {
-                    tape: self.tape,
-                    pos: val_pos,
-                },
-            ))
-        } else {
-            None
-        }
+        let key: &'t str = match &self.tape[self.pos] {
+            TapeEntry::Key(k) => k,
+            TapeEntry::EscapedKey(k) => k.as_ref(),
+            _ => return None,
+        };
+        let val_pos = self.pos + 1;
+        self.pos = tape_skip(self.tape, val_pos);
+        Some((
+            key,
+            TapeRef {
+                tape: self.tape,
+                pos: val_pos,
+            },
+        ))
     }
 }
 
@@ -289,8 +297,6 @@ impl<'t, 'src: 't> TapeRef<'t, 'src> {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use crate::{JsonRef, choose_classifier, classify_u64, classify_ymm, parse_to_tape};
 
     use super::{Tape, TapeEntry};
@@ -313,10 +319,10 @@ mod tests {
     }
 
     fn te_str(s: &'static str) -> TapeEntry<'static> {
-        TapeEntry::String(Cow::Borrowed(s))
+        TapeEntry::String(s)
     }
     fn te_key(s: &'static str) -> TapeEntry<'static> {
-        TapeEntry::Key(Cow::Borrowed(s))
+        TapeEntry::Key(s)
     }
     fn te_num(s: &'static str) -> TapeEntry<'static> {
         TapeEntry::Number(s)
