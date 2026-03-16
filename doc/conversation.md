@@ -1647,3 +1647,71 @@ minimal.
 28 unit tests + 9 doc-tests (including the new `de::from_taperef` doctest) pass.
 
 **Commit**: `9cad231` feat: add serde feature with from_taperef Deserializer for TapeRef
+
+---
+
+## Session 20 — parse_with auto-dispatches to asm dyn for classify_zmm
+
+### What was done
+
+Replaced the eleven `TapeWriter`-specific `extern "C"` trampolines
+(`tw_null`, `tw_bool_val`, …) with a generic mechanism that works for any
+`JsonWriter`:
+
+- **`WriterForZmm` internal bridge trait** (`pub(crate)`) — exposes every
+  `JsonWriter` method via raw `(*const u8, usize)` pairs, hiding the source
+  lifetime `'a`. A blanket `impl<'a, W: JsonWriter<'a>> WriterForZmm for W`
+  provides the implementation, using `std::mem::transmute` to re-attach the
+  correct `'a` lifetime to the string slice before calling the concrete writer
+  method.  This is the same unsafety pattern the old single-type trampolines
+  used, generalised over `W`.
+
+- **Generic trampolines** `zw_null::<W>`, `zw_string::<W>`, … — `unsafe extern
+  "C"` free functions monomorphised per writer type.  `build_zmm_vtab::<W>()
+  -> ZmmVtab` assembles them into a `ZmmVtab` on the stack.
+
+- **`parse_with` fast path** — when `classify == classify_zmm`, AVX-512BW is
+  present, the source starts with `{` or `[` (object / array), and the source
+  contains no backslash, `parse_json_zmm_dyn` is called with a
+  `W`-monomorphised vtable.  All other inputs fall back to the Rust path.
+
+- **`parse_to_tape_zmm_dyn` simplified** — now calls `build_zmm_vtab::<
+  TapeWriter<'a>>()` instead of inlining the deleted `tw_*` trampolines.
+
+### Design decisions
+
+**Guard conditions for the fast path.**  During testing, two pre-existing
+limitations of `parse_json_zmm_dyn` were uncovered by the new routing:
+
+1. The dyn asm crashes (SIGSEGV) on any input containing a backslash — it
+   calls the `escaped_string` / `escaped_key` vtab slots but does not
+   implement the unescape logic the Rust path provides.
+2. The dyn asm returns `false` (parse failure) for top-level JSON strings and
+   for bare scalars at the root (`"hello"` → None, but `null` / numbers / `{}`
+   / `[]` work).
+
+These limitations were masked before because the test suite used
+`parse_to_tape(src, classify_zmm)` as the _reference_ oracle (Rust path), and
+the fast path had not yet been wired up.  Rather than fixing the dyn asm (out
+of scope), the fast path guards against both conditions:
+
+```rust
+&& !src.contains('\\')
+&& src.bytes().find(|&b| !b" \t\r\n".contains(&b))
+       .map_or(false, |b| b == b'{' || b == b'[')
+```
+
+**Generic trampolines via `WriterForZmm`.**  The original trampolines cast
+`data` to `*mut TapeWriter<'static>`, relying on lifetime erasure.  To
+generalise, the bridge trait's methods reconstruct `&'a str` from raw pointers
+using `transmute`, where `'a` is the concrete lifetime from the
+`impl<'a, W: JsonWriter<'a>> WriterForZmm for W` monomorphisation.  This is
+sound for the same reason the original trampolines were sound: the assembly
+call is synchronous and `src` outlives it.
+
+### Results
+
+28 unit tests + 9 doc-tests pass (same as before; the new routing is
+transparent to all existing tests).
+
+**Commit**: `0c5c260` feat: parse_with auto-dispatches to asm dyn when classify_zmm is used
