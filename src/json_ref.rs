@@ -249,30 +249,13 @@ impl<'a, J: JsonRef<'a>> JsonRef<'a> for Option<J> {
 
 #[cfg(test)]
 mod tests {
+    use crate::parse_to_tape;
     use crate::tape::Tape;
-    use crate::{choose_classifier, classify_u64, classify_ymm, parse_to_tape};
 
     use super::JsonRef;
 
-    // -----------------------------------------------------------------------
-    // Helpers duplicated from value/tape test modules
-    // -----------------------------------------------------------------------
-
     fn run_tape(json: &'static str) -> Option<Tape<'static>> {
-        let x = parse_to_tape(json, classify_u64);
-        let y = parse_to_tape(json, classify_ymm);
-        let z = parse_to_tape(json, choose_classifier());
-        assert_eq!(
-            x.as_ref().map(|t| &t.entries),
-            z.as_ref().map(|t| &t.entries),
-            "U64 vs ZMM tape differ for: {json:?}"
-        );
-        assert_eq!(
-            y.as_ref().map(|t| &t.entries),
-            z.as_ref().map(|t| &t.entries),
-            "YMM vs ZMM tape differ for: {json:?}"
-        );
-        z
+        parse_to_tape(json)
     }
 
     // -----------------------------------------------------------------------

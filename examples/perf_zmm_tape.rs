@@ -1,4 +1,4 @@
-//! Tight-loop driver for `parse_to_tape_zmm_tape` — run under perf.
+//! Tight-loop driver for `parse_to_tape_zmm` — run under perf.
 //!
 //!   cargo build --release --example perf_zmm_tape
 //!   perf record -g target/release/examples/perf_zmm_tape
@@ -6,7 +6,7 @@
 
 #[cfg(target_arch = "x86_64")]
 fn main() {
-    use asmjson::parse_to_tape_zmm_tape;
+    use asmjson::parse_to_tape_zmm;
 
     // ~10 MiB of mixed JSON (same generator as the criterion bench).
     let data = gen_mixed(10 * 1024 * 1024);
@@ -15,7 +15,9 @@ fn main() {
     let iters = 400u64;
     let mut total_entries = 0usize;
     for _ in 0..iters {
-        let tape = parse_to_tape_zmm_tape(&data, None).expect("parse failed");
+        // SAFETY: AVX-512BW is required; this example is intended for hardware
+        // that supports it.
+        let tape = unsafe { parse_to_tape_zmm(&data, None) }.expect("parse failed");
         // Touch the tape so the compiler can't eliminate the work.
         total_entries += tape.entries.len();
     }

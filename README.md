@@ -17,17 +17,17 @@ string bodies to be skipped in a single operation.
 ## Quick start
 
 ```rust
-use asmjson::{parse_to_tape, choose_classifier, JsonRef};
+use asmjson::{parse_to_tape, JsonRef};
 
-let classify = choose_classifier(); // picks best for the current CPU
-let tape = parse_to_tape(r#"{"name":"Alice","age":30}"#, classify).unwrap();
+let tape = parse_to_tape(r#"{"name":"Alice","age":30}"#).unwrap();
 
 assert_eq!(tape.root().get("name").as_str(), Some("Alice"));
 assert_eq!(tape.root().get("age").as_i64(), Some(30));
 ```
 
-For repeated parses, store the result of `choose_classifier` in a static once
-cell or pass it through your application rather than calling it on every parse.
+For maximum throughput on CPUs with AVX-512BW (Ice Lake+, Zen 4+), use the
+unsafe assembly entry points `parse_to_tape_zmm` / `parse_with_zmm`.  It is
+the caller's responsibility to ensure AVX-512BW support before calling them.
 
 ## Benchmarks
 
@@ -81,11 +81,10 @@ need several fields from the same object, iterate once with `object_iter` and
 keep the values you care about:
 
 ```rust
-use asmjson::{parse_to_tape, choose_classifier, JsonRef, TapeRef};
+use asmjson::{parse_to_tape, JsonRef, TapeRef};
 
-let classify = choose_classifier();
 let src = r#"{"items":[1,2,3],"meta":{"count":3}}"#;
-let tape = parse_to_tape(src, classify).unwrap();
+let tape = parse_to_tape(src).unwrap();
 let root = tape.root().unwrap();
 
 // Single pass — O(n_keys) regardless of how many fields we need.
@@ -111,11 +110,10 @@ results into a `Vec<TapeRef>` gives you random access and any number of
 further passes at zero additional parsing cost:
 
 ```rust
-use asmjson::{parse_to_tape, choose_classifier, JsonRef, TapeRef};
+use asmjson::{parse_to_tape, JsonRef, TapeRef};
 
-let classify = choose_classifier();
 let src = r#"[{"name":"Alice","score":91},{"name":"Bob","score":78},{"name":"Carol","score":85}]"#;
-let tape = parse_to_tape(src, classify).unwrap();
+let tape = parse_to_tape(src).unwrap();
 let root = tape.root().unwrap();
 
 // Collect once — O(n) scan.
@@ -136,18 +134,19 @@ assert_eq!(total, 91 + 78 + 85);
 - `parse_to_tape` — allocates a flat `Tape` of tokens with O(1) structural skips.
 - `parse_with` — drives a custom `JsonWriter` sink; zero extra allocation.
 
-## Classifiers
+## API
 
-The classifier is a plain function pointer that labels 64 bytes at a time.
-Three are provided:
+Four entry points are provided:
 
-| Classifier      | ISA           | Speed   |
-|-----------------|---------------|---------|
-| `classify_zmm`  | AVX-512BW     | fastest |
-| `classify_ymm`  | AVX2          | fast    |
-| `classify_u64`  | portable SWAR | good    |
+| Function                   | Safety   | Description |
+|----------------------------|----------|-------------|
+| `parse_to_tape(src)`       | safe     | Parse to a flat `Tape`; portable SWAR classifier. |
+| `parse_with(src, writer)`  | safe     | Drive a custom `JsonWriter`; portable SWAR classifier. |
+| `unsafe parse_to_tape_zmm(src, cap)` | **unsafe** | Parse to `Tape`; AVX-512BW assembly (direct tape write). |
+| `unsafe parse_with_zmm(src, writer)` | **unsafe** | Drive a `JsonWriter`; AVX-512BW assembly (vtable dispatch). |
 
-Use `choose_classifier` to select automatically at runtime.
+The `unsafe` variants require a CPU with AVX-512BW support.  Calling them on
+an unsupported CPU will trigger an illegal instruction fault.
 
 ## Conformance note
 

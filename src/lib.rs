@@ -522,7 +522,7 @@ fn write_atom<'a, W: JsonWriter<'a>>(s: &'a str, w: &mut W) -> bool {
 // Public parse entry points
 // ---------------------------------------------------------------------------
 
-/// Parse `src` into a flat [`Tape`] using the given classifier.
+/// Parse `src` into a flat [`Tape`] using the portable SWAR classifier.
 ///
 /// Returns `None` if the input is not valid JSON.
 ///
@@ -530,59 +530,15 @@ fn write_atom<'a, W: JsonWriter<'a>>(s: &'a str, w: &mut W) -> bool {
 /// closer so entire subtrees can be skipped in O(1).  Access the tape via
 /// [`Tape::root`] which returns a [`TapeRef`] cursor that implements [`JsonRef`].
 ///
+/// For maximum throughput on CPUs with AVX-512BW, use [`parse_to_tape_zmm`].
+///
 /// ```rust
-/// use asmjson::{parse_to_tape, choose_classifier, JsonRef};
-/// let tape = parse_to_tape(r#"{"x":1}"#, choose_classifier()).unwrap();
+/// use asmjson::{parse_to_tape, JsonRef};
+/// let tape = parse_to_tape(r#"{"x":1}"#).unwrap();
 /// assert_eq!(tape.root().get("x").as_i64(), Some(1));
 /// ```
-pub fn parse_to_tape<'a>(src: &'a str, classify: ClassifyFn) -> Option<Tape<'a>> {
-    parse_with(src, classify, TapeWriter::new())
-}
-
-/// Parse `src` to a [`Tape`] using the hand-written x86-64 AVX-512BW
-/// assembly parser with direct-threaded state dispatch.
-///
-/// Unlike [`parse_to_tape`] this function has the ZMM classifier baked in
-/// and requires no `classify` argument.  Only available on `x86_64` targets.
-///
-/// Returns `None` if the JSON is invalid or nesting exceeds
-/// [`MAX_JSON_DEPTH`] levels.
-///
-/// ```rust
-/// #[cfg(target_arch = "x86_64")]
-/// {
-///     use asmjson::parse_to_tape_zmm_dyn;
-///     let tape = parse_to_tape_zmm_dyn(r#"{"x":1}"#).unwrap();
-///     use asmjson::JsonRef;
-///     assert_eq!(tape.root().get("x").as_i64(), Some(1));
-/// }
-/// ```
-#[cfg(target_arch = "x86_64")]
-pub fn parse_to_tape_zmm_dyn<'a>(src: &'a str) -> Option<Tape<'a>> {
-    let mut writer = TapeWriter::new();
-    let mut frames_buf = [FrameKind::Object; MAX_JSON_DEPTH];
-    let mut unescape_buf = String::new();
-    let vtab = build_zmm_vtab::<TapeWriter<'a>>();
-
-    // SAFETY:
-    //   • `writer` is alive for the entire assembly call and is the only
-    //     mutable reference to its entries.
-    //   • `src` lives for at least `'a`, so the slices stored into the tape
-    //     by the trampolines remain valid after the call.
-    //   • `parse_json_zmm_dyn` only calls &mut self methods; it does NOT call
-    //     `finish`.
-    let ok = unsafe {
-        parse_json_zmm_dyn(
-            src.as_ptr(),
-            src.len(),
-            &raw mut writer as *mut (),
-            &vtab,
-            frames_buf.as_mut_ptr() as *mut u8,
-            &raw mut unescape_buf,
-        )
-    };
-
-    if ok { writer.finish() } else { None }
+pub fn parse_to_tape<'a>(src: &'a str) -> Option<Tape<'a>> {
+    parse_with(src, TapeWriter::new())
 }
 
 /// Parse `src` to a [`Tape`] using the hand-written x86-64 AVX-512BW
@@ -599,31 +555,26 @@ pub fn parse_to_tape_zmm_dyn<'a>(src: &'a str) -> Option<Tape<'a>> {
 /// Only available on `x86_64` targets.  Returns `None` if the JSON is
 /// invalid or nesting exceeds [`MAX_JSON_DEPTH`] levels.
 ///
-/// # Panics
+/// # Safety
 ///
-/// Panics at runtime if the CPU does not support AVX-512BW.  For automatic
-/// ISA dispatch use [`parse_to_tape`] with [`choose_classifier`].
+/// The caller must ensure the CPU supports AVX-512BW.  Invoking this on a CPU
+/// without AVX-512BW support will trigger an illegal instruction fault.  Use
+/// [`parse_to_tape`] for portable code.
 ///
 /// ```rust
 /// #[cfg(target_arch = "x86_64")]
 /// {
-///     use asmjson::parse_to_tape_zmm_tape;
-///     let tape = parse_to_tape_zmm_tape(r#"{"x":1}"#, None).unwrap();
+///     use asmjson::parse_to_tape_zmm;
+///     let tape = unsafe { parse_to_tape_zmm(r#"{"x":1}"#, None) }.unwrap();
 ///     use asmjson::JsonRef;
 ///     assert_eq!(tape.root().get("x").as_i64(), Some(1));
 /// }
 /// ```
 #[cfg(target_arch = "x86_64")]
-pub fn parse_to_tape_zmm_tape<'a>(
+pub unsafe fn parse_to_tape_zmm<'a>(
     src: &'a str,
     initial_capacity: Option<usize>,
 ) -> Option<Tape<'a>> {
-    assert!(
-        std::is_x86_feature_detected!("avx512bw"),
-        "parse_to_tape_zmm_tape requires AVX-512BW; \
-         use parse_to_tape or choose_classifier() for automatic dispatch"
-    );
-
     // Result codes matching the assembly RESULT_* constants.
     const RESULT_OK: u8 = 0;
     const RESULT_PARSE_ERROR: u8 = 1;
@@ -697,65 +648,65 @@ pub fn parse_to_tape_zmm_tape<'a>(
 /// Parse `src` using a custom [`JsonWriter`], returning its output.
 ///
 /// This is the generic entry point: supply your own writer to produce any
-/// output in a single pass over the source.
+/// output in a single pass over the source.  Uses the portable SWAR
+/// classifier; works on any architecture.
 ///
-/// When `classify` is [`classify_zmm`], the CPU supports AVX-512BW, the
-/// source is a JSON object or array (first non-whitespace byte is `{` or
-/// `[`), and the source contains no backslash escape sequences, the
-/// hand-written assembly parser ([`parse_to_tape_zmm_dyn`]) is used
-/// automatically instead of the Rust state machine.  All other inputs fall
-/// back to the Rust path, which handles every valid JSON value.
-pub fn parse_with<'a, W: JsonWriter<'a>>(
-    src: &'a str,
-    classify: ClassifyFn,
-    mut writer: W,
-) -> Option<W::Output> {
-    #[cfg(target_arch = "x86_64")]
-    if classify == classify_zmm
-        && std::is_x86_feature_detected!("avx512bw")
-        && !src.contains('\\')
-        && src
-            .as_bytes()
-            .iter()
-            .find(|&&b| !matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
-            .map_or(false, |&b| b == b'{' || b == b'[')
-    {
-        let vtab = build_zmm_vtab::<W>();
-        let mut frames_buf = [FrameKind::Object; MAX_JSON_DEPTH];
-        let mut unescape_buf = String::new();
-        // SAFETY: identical invariants to parse_to_tape_zmm_dyn — writer and
-        // src both live for 'a which outlasts the synchronous assembly call.
-        // The guards above ensure no escaped_string / escaped_key callbacks
-        // are issued, and that the input begins with an object or array as
-        // the assembly parser requires.
-        let ok = unsafe {
-            parse_json_zmm_dyn(
-                src.as_ptr(),
-                src.len(),
-                &raw mut writer as *mut (),
-                &vtab,
-                frames_buf.as_mut_ptr() as *mut u8,
-                &raw mut unescape_buf,
-            )
-        };
-        return if ok { writer.finish() } else { None };
-    }
+/// For maximum throughput on CPUs with AVX-512BW, use [`parse_with_zmm`].
+pub fn parse_with<'a, W: JsonWriter<'a>>(src: &'a str, writer: W) -> Option<W::Output> {
     let mut frames_buf = [FrameKind::Object; MAX_JSON_DEPTH];
     let mut unescape_buf = String::new();
-    parse_json_impl(src, classify, writer, &mut frames_buf, &mut unescape_buf)
+    parse_json_impl(src, writer, &mut frames_buf, &mut unescape_buf)
 }
 
-fn parse_json_impl<'a, F, W>(
+/// Parse `src` using a custom [`JsonWriter`] and the hand-written x86-64
+/// AVX-512BW assembly parser with direct-threaded state dispatch.
+///
+/// Only available on `x86_64` targets.  Returns `None` if the JSON is
+/// invalid or nesting exceeds [`MAX_JSON_DEPTH`] levels.
+///
+/// # Safety
+///
+/// The caller must ensure the CPU supports AVX-512BW.  Invoking this on a CPU
+/// without AVX-512BW support will trigger an illegal instruction fault.  Use
+/// [`parse_with`] for portable code.
+///
+/// # Limitations
+///
+/// The underlying assembly parser does not implement escape processing.  Inputs
+/// containing backslash sequences (e.g. `\"`, `\n`, `\u0041`) or top-level
+/// scalars / strings will not be parsed correctly.  Only pass backslash-free
+/// JSON objects or arrays.  For full JSON support use [`parse_with`] or
+/// [`parse_to_tape_zmm`].
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn parse_with_zmm<'a, W: JsonWriter<'a>>(
     src: &'a str,
-    classify: F,
+    mut writer: W,
+) -> Option<W::Output> {
+    let vtab = build_zmm_vtab::<W>();
+    let mut frames_buf = [FrameKind::Object; MAX_JSON_DEPTH];
+    let mut unescape_buf = String::new();
+    // SAFETY (caller obligation): CPU supports AVX-512BW.
+    // SAFETY (internal): writer and src both live for 'a, outlasting this
+    // synchronous call.  parse_json_zmm_dyn does NOT call finish.
+    let ok = unsafe {
+        parse_json_zmm_dyn(
+            src.as_ptr(),
+            src.len(),
+            &raw mut writer as *mut (),
+            &vtab,
+            frames_buf.as_mut_ptr() as *mut u8,
+            &raw mut unescape_buf,
+        )
+    };
+    if ok { writer.finish() } else { None }
+}
+
+fn parse_json_impl<'a, W: JsonWriter<'a>>(
+    src: &'a str,
     mut writer: W,
     frames_buf: &mut [FrameKind; MAX_JSON_DEPTH],
     unescape_buf: &mut String,
-) -> Option<W::Output>
-where
-    F: Fn(&[u8]) -> ByteState,
-    W: JsonWriter<'a>,
-{
+) -> Option<W::Output> {
     let bytes = src.as_bytes();
     let mut frames_depth: usize = 0;
     let mut str_start: usize = 0; // absolute byte offset of char after opening '"'
@@ -770,7 +721,7 @@ where
     while pos < bytes.len() {
         let chunk_len = (bytes.len() - pos).min(64);
         let chunk = &bytes[pos..pos + chunk_len];
-        let byte_state = classify(chunk);
+        let byte_state = classify_u64(chunk);
 
         let mut chunk_offset = 0;
         'inner: while chunk_offset < chunk_len {
@@ -1302,15 +1253,6 @@ impl ByteStateConstants {
 static ZMM_CONSTANTS: ByteStateConstants = ByteStateConstants::new();
 
 // ---------------------------------------------------------------------------
-// Classifier wrappers, type alias, and CPUID-based selection
-// ---------------------------------------------------------------------------
-
-/// The type of a chunk classifier: takes a 1–64 byte slice and returns the
-/// four bitmasks the parser needs.  All three register-width variants share
-/// this signature, so the choice can be stored as a plain function pointer.
-pub type ClassifyFn = fn(&[u8]) -> ByteState;
-
-// ---------------------------------------------------------------------------
 // YMM (AVX2) — 2 × 32-byte registers, 64 bytes total
 // ---------------------------------------------------------------------------
 
@@ -1318,7 +1260,8 @@ pub type ClassifyFn = fn(&[u8]) -> ByteState;
 ///
 /// Whitespace detection uses the identity:
 ///   `unsigned a <= 0x20`  ↔  `max_epu8(a, 0x20) == 0x20`
-pub fn classify_ymm(src: &[u8]) -> ByteState {
+#[cfg(test)]
+fn classify_ymm(src: &[u8]) -> ByteState {
     #[target_feature(enable = "avx2")]
     unsafe fn imp(src: &[u8]) -> ByteState {
         unsafe {
@@ -1394,7 +1337,8 @@ pub fn classify_ymm(src: &[u8]) -> ByteState {
 /// Classify up to 64 bytes from `src` using AVX-512BW.
 /// Bytes beyond `src.len()` are zeroed via masked load; their whitespace bits
 /// are set to 1 (0 <= 0x20) but are never visited by the inner loop.
-pub fn classify_zmm(src: &[u8]) -> ByteState {
+#[cfg(test)]
+fn classify_zmm(src: &[u8]) -> ByteState {
     #[target_feature(enable = "avx512bw")]
     unsafe fn imp(src: &[u8]) -> ByteState {
         assert!(!src.is_empty() && src.len() <= 64);
@@ -1467,6 +1411,7 @@ pub fn classify_zmm(src: &[u8]) -> ByteState {
 
 /// Classify up to 64 bytes purely in software using SWAR
 /// (SIMD Within A Register) bit-manipulation on eight `u64` words.
+/// The Rust parse path always uses this classifier.
 ///
 /// Three tricks are used:
 ///
@@ -1482,7 +1427,7 @@ pub fn classify_zmm(src: &[u8]) -> ByteState {
 /// * **Movemask**: collect the MSB of each byte into the low 8 bits by
 ///   multiplying `(v & 0x8080…)` by `0x0002_0408_1020_4081` and taking the
 ///   top byte (shift right 56).
-pub fn classify_u64(src: &[u8]) -> ByteState {
+fn classify_u64(src: &[u8]) -> ByteState {
     assert!(!src.is_empty() && src.len() <= 64);
     let mut buf = [0u8; 64];
     buf[..src.len()].copy_from_slice(src);
@@ -1538,31 +1483,6 @@ pub fn classify_u64(src: &[u8]) -> ByteState {
         backslashes: u64::from_le_bytes(bs),
         delimiters: u64::from_le_bytes(dl),
     }
-}
-
-/// Choose the best available classifier for the current CPU using CPUID.
-///
-/// Call this once at program start (or use it to initialise a `static`) and
-/// pass the returned function pointer to every [`parse_json`] call:
-///
-/// ```ignore
-/// let classify = choose_classifier();
-/// let value = parse_json(json, classify);
-/// ```
-///
-/// The precedence is: AVX-512BW → AVX2 → portable SWAR u64.
-pub fn choose_classifier() -> ClassifyFn {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if std::is_x86_feature_detected!("avx512bw") {
-            return classify_zmm;
-        }
-        if std::is_x86_feature_detected!("avx2") {
-            return classify_ymm;
-        }
-    }
-    #[allow(unreachable_code)]
-    classify_u64
 }
 
 #[cfg(test)]
@@ -1629,17 +1549,14 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // zmm_tape correctness: compare parse_to_tape_zmm_tape against
-    // parse_to_tape_zmm_dyn across a range of JSON inputs.
+    // zmm_tape correctness: compare parse_to_tape_zmm against the Rust
+    // reference parser across a range of JSON inputs.
     // -----------------------------------------------------------------------
 
     #[cfg(target_arch = "x86_64")]
     fn zmm_tape_matches_dyn(src: &str) {
-        // Use the Rust reference parser as the oracle (zmm_dyn does not
-        // support top-level scalars, but the tape variant does).
-        let ref_tape = parse_to_tape(src, classify_zmm)
-            .unwrap_or_else(|| panic!("reference rejected: {src:?}"));
-        let asm_tape = parse_to_tape_zmm_tape(src, None)
+        let ref_tape = parse_to_tape(src).unwrap_or_else(|| panic!("reference rejected: {src:?}"));
+        let asm_tape = unsafe { parse_to_tape_zmm(src, None) }
             .unwrap_or_else(|| panic!("zmm_tape rejected: {src:?}"));
         assert_eq!(
             ref_tape.entries, asm_tape.entries,
@@ -1650,7 +1567,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     fn zmm_tape_rejects(src: &str) {
         assert!(
-            parse_to_tape_zmm_tape(src, None).is_none(),
+            unsafe { parse_to_tape_zmm(src, None) }.is_none(),
             "zmm_tape should reject {src:?}"
         );
     }
@@ -1785,7 +1702,8 @@ mod tests {
             s
         };
         // Use Some(4) to guarantee at least one overflow retry regardless of input size.
-        let tape = parse_to_tape_zmm_tape(&big, Some(4)).expect("overflow retry should succeed");
+        let tape =
+            unsafe { parse_to_tape_zmm(&big, Some(4)) }.expect("overflow retry should succeed");
         assert_eq!(tape.root().unwrap().array_iter().unwrap().count(), 200);
     }
 }

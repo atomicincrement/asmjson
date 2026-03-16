@@ -620,9 +620,9 @@ impl<'t, 'src: 't> TapeRef<'t, 'src> {
     /// # Example
     ///
     /// ```rust
-    /// use asmjson::{parse_to_tape, choose_classifier, JsonRef};
+    /// use asmjson::{parse_to_tape, JsonRef};
     ///
-    /// let tape = parse_to_tape(r#"{"a":1,"b":2}"#, choose_classifier()).unwrap();
+    /// let tape = parse_to_tape(r#"{"a":1,"b":2}"#).unwrap();
     /// let root = tape.root().unwrap();
     /// for (key, val) in root.object_iter().unwrap() {
     ///     println!("{key}: {}", val.as_number_str().unwrap());
@@ -644,9 +644,9 @@ impl<'t, 'src: 't> TapeRef<'t, 'src> {
     /// # Example
     ///
     /// ```rust
-    /// use asmjson::{parse_to_tape, choose_classifier, JsonRef};
+    /// use asmjson::{parse_to_tape, JsonRef};
     ///
-    /// let tape = parse_to_tape(r#"[1,2,3]"#, choose_classifier()).unwrap();
+    /// let tape = parse_to_tape(r#"[1,2,3]"#).unwrap();
     /// let root = tape.root().unwrap();
     /// for elem in root.array_iter().unwrap() {
     ///     println!("{}", elem.as_number_str().unwrap());
@@ -669,25 +669,12 @@ impl<'t, 'src: 't> TapeRef<'t, 'src> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{JsonRef, choose_classifier, classify_u64, classify_ymm, parse_to_tape};
+    use crate::{JsonRef, parse_to_tape};
 
     use super::{Tape, TapeEntry};
 
     fn run_tape(json: &'static str) -> Option<Tape<'static>> {
-        let x = parse_to_tape(json, classify_u64);
-        let y = parse_to_tape(json, classify_ymm);
-        let z = parse_to_tape(json, choose_classifier());
-        assert_eq!(
-            x.as_ref().map(|t| &t.entries),
-            z.as_ref().map(|t| &t.entries),
-            "U64 vs ZMM tape differ for: {json:?}"
-        );
-        assert_eq!(
-            y.as_ref().map(|t| &t.entries),
-            z.as_ref().map(|t| &t.entries),
-            "YMM vs ZMM tape differ for: {json:?}"
-        );
-        z
+        parse_to_tape(json)
     }
 
     fn te_str(s: &'static str) -> TapeEntry<'static> {
@@ -847,7 +834,7 @@ mod tests {
         assert_eq!(pairs[2].0, "z");
         assert_eq!(pairs[2].1, (None, None, Some("hi")));
         // Non-object returns None.
-        let at = parse_to_tape("[1]", classify_u64).unwrap();
+        let at = parse_to_tape("[1]").unwrap();
         assert!(at.root().unwrap().object_iter().is_none());
     }
 
@@ -868,7 +855,7 @@ mod tests {
         assert!(nelems[0].is_array());
         assert!(nelems[1].is_object());
         // Non-array returns None.
-        let ot = parse_to_tape(r#"{"a":1}"#, classify_u64).unwrap();
+        let ot = parse_to_tape(r#"{"a":1}"#).unwrap();
         assert!(ot.root().unwrap().array_iter().is_none());
     }
 }
