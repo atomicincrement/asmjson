@@ -2,15 +2,16 @@
 
 #[cfg(feature = "serde")]
 pub mod de;
-pub mod json_ref;
-pub mod tape;
+pub mod dom;
+pub mod sax;
 
 #[cfg(feature = "serde")]
 pub use de::from_taperef;
-pub use json_ref::JsonRef;
-pub use tape::{Tape, TapeArrayIter, TapeEntry, TapeEntryKind, TapeObjectIter, TapeRef};
+pub use dom::json_ref::JsonRef;
+pub use dom::{Tape, TapeArrayIter, TapeEntry, TapeEntryKind, TapeObjectIter, TapeRef};
+pub use sax::Sax;
 
-use tape::TapeWriter;
+use dom::TapeWriter;
 
 // ---------------------------------------------------------------------------
 // Hand-written x86-64 AVX-512BW assembly parser (direct-threading, C vtable)
@@ -68,7 +69,7 @@ pub(crate) trait WriterForZmm {
 }
 
 #[cfg(target_arch = "x86_64")]
-impl<'a, W: JsonWriter<'a>> WriterForZmm for W {
+impl<'a, W: Sax<'a>> WriterForZmm for W {
     unsafe fn wfz_null(&mut self) {
         self.null()
     }
@@ -363,48 +364,8 @@ enum FrameKind {
 /// Maximum supported JSON nesting depth (objects + arrays combined).
 pub const MAX_JSON_DEPTH: usize = 64;
 
-// ---------------------------------------------------------------------------
-// JsonWriter trait — SAX-style event sink
-// ---------------------------------------------------------------------------
-
-/// Receives a stream of structural events as the parser walks the input.
-///
-/// Implement this trait to produce any output from a single pass over the JSON
-/// source.  Two built-in implementations are provided — the one used by
-/// [`parse_json`] (producing a nested [`Value`] tree) and the one used by
-/// [`parse_to_tape`] (producing a flat [`Tape`]).
-///
-/// A custom writer can use [`parse_with`] to drive the parse.
-pub trait JsonWriter<'src> {
-    /// The type returned by [`finish`](JsonWriter::finish).
-    type Output;
-
-    /// A `null` literal was parsed.
-    fn null(&mut self);
-    /// A `true` or `false` literal was parsed.
-    fn bool_val(&mut self, v: bool);
-    /// A JSON number; `s` is a slice of the original source string.
-    fn number(&mut self, s: &'src str);
-    /// A JSON string value with no escape sequences; `s` borrows from the source.
-    fn string(&mut self, s: &'src str);
-    /// A JSON string value that contained escape sequences; `s` is the decoded text.
-    fn escaped_string(&mut self, s: Box<str>);
-    /// An object key with no escape sequences; `s` borrows from the source.
-    fn key(&mut self, s: &'src str);
-    /// An object key that contained escape sequences; `s` is the decoded text.
-    fn escaped_key(&mut self, s: Box<str>);
-    /// Opening `{` of an object.
-    fn start_object(&mut self);
-    /// Closing `}` of an object.
-    fn end_object(&mut self);
-    /// Opening `[` of an array.
-    fn start_array(&mut self);
-    /// Closing `]` of an array.
-    fn end_array(&mut self);
-    /// Called once after the last token; returns the final output or `None` on
-    /// internal error.
-    fn finish(self) -> Option<Self::Output>;
-}
+// The Sax trait (SAX-style event sink) lives in the `sax` module.
+// Re-exported at crate root as `pub use sax::Sax`.
 
 // ---------------------------------------------------------------------------
 // Atom helper — Validate a JSON number.
@@ -493,7 +454,7 @@ pub extern "C" fn tape_take_box_str(
     }
 }
 
-fn write_atom<'a, W: JsonWriter<'a>>(s: &'a str, w: &mut W) -> bool {
+fn write_atom<'a, W: Sax<'a>>(s: &'a str, w: &mut W) -> bool {
     match s {
         "true" => {
             w.bool_val(true);
@@ -652,7 +613,7 @@ pub unsafe fn parse_to_tape_zmm<'a>(
 /// classifier; works on any architecture.
 ///
 /// For maximum throughput on CPUs with AVX-512BW, use [`parse_with_zmm`].
-pub fn parse_with<'a, W: JsonWriter<'a>>(src: &'a str, writer: W) -> Option<W::Output> {
+pub fn parse_with<'a, W: Sax<'a>>(src: &'a str, writer: W) -> Option<W::Output> {
     let mut frames_buf = [FrameKind::Object; MAX_JSON_DEPTH];
     let mut unescape_buf = String::new();
     parse_json_impl(src, writer, &mut frames_buf, &mut unescape_buf)
@@ -678,10 +639,7 @@ pub fn parse_with<'a, W: JsonWriter<'a>>(src: &'a str, writer: W) -> Option<W::O
 /// JSON objects or arrays.  For full JSON support use [`parse_with`] or
 /// [`parse_to_tape_zmm`].
 #[cfg(target_arch = "x86_64")]
-pub unsafe fn parse_with_zmm<'a, W: JsonWriter<'a>>(
-    src: &'a str,
-    mut writer: W,
-) -> Option<W::Output> {
+pub unsafe fn parse_with_zmm<'a, W: Sax<'a>>(src: &'a str, mut writer: W) -> Option<W::Output> {
     let vtab = build_zmm_vtab::<W>();
     let mut frames_buf = [FrameKind::Object; MAX_JSON_DEPTH];
     let mut unescape_buf = String::new();
@@ -701,7 +659,7 @@ pub unsafe fn parse_with_zmm<'a, W: JsonWriter<'a>>(
     if ok { writer.finish() } else { None }
 }
 
-fn parse_json_impl<'a, W: JsonWriter<'a>>(
+fn parse_json_impl<'a, W: Sax<'a>>(
     src: &'a str,
     mut writer: W,
     frames_buf: &mut [FrameKind; MAX_JSON_DEPTH],

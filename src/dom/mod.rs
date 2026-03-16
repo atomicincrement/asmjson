@@ -1,4 +1,6 @@
-use crate::JsonWriter;
+pub mod json_ref;
+
+use crate::sax::Sax;
 
 // ---------------------------------------------------------------------------
 // TapeEntryKind — top 4 bits of the tag word
@@ -442,7 +444,7 @@ impl<'a> TapeWriter<'a> {
     }
 }
 
-impl<'a> JsonWriter<'a> for TapeWriter<'a> {
+impl<'a> Sax<'a> for TapeWriter<'a> {
     type Output = Tape<'a>;
 
     fn null(&mut self) {
@@ -515,8 +517,7 @@ impl<'a> JsonWriter<'a> for TapeWriter<'a> {
 /// `'a` in the common case where you borrow the tape and the source in the
 /// same scope.
 ///
-/// Created via [`Tape::root`].  Implements [`crate::JsonRef`] alongside
-/// `&'t Value<'src>`.
+/// Created via [`Tape::root`].  Implements [`crate::JsonRef`].
 #[derive(Clone, Copy)]
 pub struct TapeRef<'t, 'src: 't> {
     pub(crate) tape: &'t [TapeEntry<'src>],

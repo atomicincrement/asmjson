@@ -1,4 +1,4 @@
-use crate::tape::{TapeEntryKind, TapeRef, tape_skip};
+use super::{TapeEntryKind, TapeRef, tape_skip};
 
 // ---------------------------------------------------------------------------
 // JsonRef trait
@@ -11,7 +11,7 @@ use crate::tape::{TapeEntryKind, TapeRef, tape_skip};
 /// least `'a`.
 ///
 /// Implemented by:
-/// - [`TapeRef<'a, _>`] — lightweight cursor into a flat [`crate::tape::Tape`].
+/// - [`TapeRef<'a, _>`] — lightweight cursor into a flat [`super::Tape`].
 /// - `Option<J>` where `J: JsonRef<'a>` — transparent wrapper enabling chaining
 ///   without intermediate `?` or `.and_then`: `root.get("a").get("b").as_str()`.
 pub trait JsonRef<'a>: Sized + Copy {
@@ -249,8 +249,8 @@ impl<'a, J: JsonRef<'a>> JsonRef<'a> for Option<J> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::Tape;
     use crate::parse_to_tape;
-    use crate::tape::Tape;
 
     use super::JsonRef;
 
@@ -259,7 +259,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // JsonRef tests — exercise the trait on both &Value and TapeRef
+    // JsonRef tests — exercise the trait on TapeRef
     // -----------------------------------------------------------------------
 
     #[test]

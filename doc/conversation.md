@@ -1829,3 +1829,51 @@ comparison point.
 to the dominance of string-data throughput).
 
 **Commit**: `855c37c` bench: add LenSumWriter, rename zmm→sax, zmm_tape→dom; update conversation log
+
+---
+
+## Session 23 — Module restructure: dom / sax
+
+### What was done
+
+Reorganised the crate's public module layout:
+
+- **`src/tape.rs` → `src/dom/mod.rs`** — the flat-tape types (`Tape`,
+  `TapeEntry`, `TapeEntryKind`, `TapeRef`, `TapeWriter`, iterators) now live
+  under the `dom` module, reflecting that they implement a DOM (document object
+  model) representation.
+
+- **`src/json_ref.rs` → `src/dom/json_ref.rs`** — the `JsonRef` trait moved
+  into `dom` as a submodule.  Its import of `tape::` became `super::` (parent
+  module).
+
+- **`src/sax.rs` (new)** — the `JsonWriter` trait was renamed to `Sax` and
+  extracted to its own module.  All internal references in `lib.rs` were
+  updated from `JsonWriter` to `Sax`.  The `TapeWriter` implementation and
+  the `WriterForZmm` blanket impl were updated accordingly.
+
+- **`src/lib.rs`** — module declarations updated (`tape`→`dom`, new `sax`),
+  re-exports updated (`pub use dom::…`, `pub use dom::json_ref::JsonRef`,
+  `pub use sax::Sax`), `JsonWriter` trait definition removed.
+
+- **`src/de.rs`** — `use crate::tape::` → `use crate::dom::`.
+
+- **`benches/parse.rs`** — `use asmjson::JsonWriter` → `use asmjson::sax::Sax`,
+  `impl JsonWriter for LenSumWriter` → `impl Sax for LenSumWriter`.
+
+### Design decisions
+
+Naming `Sax` aligns with the common use of "SAX" (Simple API for XML) to
+describe event-driven, streaming parsers — the `Sax` trait is called once
+per token with no tree built.  Grouping the DOM types under `dom` makes the
+complementary structure explicit: `asmjson::dom::Tape` for tree-shaped access,
+`asmjson::sax::Sax` for streaming.
+
+The `WriterForZmm` private bridge trait updates were purely mechanical.
+
+### Results
+
+All tests pass (27 unit + doc-tests).  No regressions.  One pre-existing
+`dead_code` warning on `source_string` remains unchanged.
+
+**Commit**: `2640796` refactor: rename tape→dom, json_ref into dom, JsonWriter→Sax in sax module

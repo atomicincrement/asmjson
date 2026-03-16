@@ -4,16 +4,17 @@ use asmjson::parse_to_tape as parse_json;
 use asmjson::parse_to_tape_zmm;
 #[cfg(target_arch = "x86_64")]
 use asmjson::parse_with_zmm;
+use asmjson::sax::Sax;
 #[cfg(feature = "stats")]
 use asmjson::stats;
-use asmjson::{JsonWriter, TapeEntryKind, parse_to_tape};
+use asmjson::{TapeEntryKind, parse_to_tape};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 // ---------------------------------------------------------------------------
 // SAX writer — sums key and string byte lengths without building a tape
 // ---------------------------------------------------------------------------
 
-/// A [`JsonWriter`] that accumulates the total byte length of every string
+/// A [`Sax`] writer that accumulates the total byte length of every string
 /// value and object key.  Allocates nothing; suitable for benchmarking the
 /// pure parse cost of the SAX path.
 struct LenSumWriter {
@@ -26,7 +27,7 @@ impl LenSumWriter {
     }
 }
 
-impl<'src> JsonWriter<'src> for LenSumWriter {
+impl<'src> Sax<'src> for LenSumWriter {
     type Output = usize;
     fn null(&mut self) {}
     fn bool_val(&mut self, _v: bool) {}

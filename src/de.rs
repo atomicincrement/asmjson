@@ -2,7 +2,7 @@
 //!
 //! Enabled with the `serde` feature flag.
 
-use crate::tape::{TapeArrayIter, TapeEntryKind, TapeObjectIter, TapeRef};
+use crate::dom::{TapeArrayIter, TapeEntryKind, TapeObjectIter, TapeRef};
 use serde::Deserialize;
 use serde::de::{self, DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
 use std::fmt;
