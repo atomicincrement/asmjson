@@ -250,7 +250,7 @@ fn bench_string_array(c: &mut Criterion) {
     #[cfg(target_arch = "x86_64")]
     group.bench_function("asmjson/zmm_tape", |b| {
         b.iter(|| {
-            let tape = parse_to_tape_zmm_tape(&data).unwrap();
+            let tape = parse_to_tape_zmm_tape(&data, None).unwrap();
             std::hint::black_box(tape_sum_lens(&tape))
         });
     });
@@ -304,7 +304,7 @@ fn bench_string_object(c: &mut Criterion) {
     #[cfg(target_arch = "x86_64")]
     group.bench_function("asmjson/zmm_tape", |b| {
         b.iter(|| {
-            let tape = parse_to_tape_zmm_tape(&data).unwrap();
+            let tape = parse_to_tape_zmm_tape(&data, None).unwrap();
             std::hint::black_box(tape_sum_lens(&tape))
         });
     });
@@ -358,7 +358,7 @@ fn bench_mixed(c: &mut Criterion) {
     #[cfg(target_arch = "x86_64")]
     group.bench_function("asmjson/zmm_tape", |b| {
         b.iter(|| {
-            let tape = parse_to_tape_zmm_tape(&data).unwrap();
+            let tape = parse_to_tape_zmm_tape(&data, None).unwrap();
             std::hint::black_box(tape_sum_lens(&tape))
         });
     });

@@ -15,7 +15,7 @@ fn main() {
     let iters = 400u64;
     let mut total_entries = 0usize;
     for _ in 0..iters {
-        let tape = parse_to_tape_zmm_tape(&data).expect("parse failed");
+        let tape = parse_to_tape_zmm_tape(&data, None).expect("parse failed");
         // Touch the tape so the compiler can't eliminate the work.
         total_entries += tape.entries.len();
     }

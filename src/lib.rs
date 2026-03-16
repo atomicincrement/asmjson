@@ -315,7 +315,7 @@ pub trait JsonWriter<'src> {
 }
 
 // ---------------------------------------------------------------------------
-// Atom helper — writes a number / bool / null through any JsonWriter
+// Atom helper — Validate a JSON number.
 // ---------------------------------------------------------------------------
 
 fn is_valid_json_number(s: &[u8]) -> bool {
@@ -513,9 +513,12 @@ pub fn parse_to_tape_zmm_dyn<'a>(src: &'a str) -> Option<Tape<'a>> {
 /// assembly parser that writes [`TapeEntry`] values directly into a
 /// pre-allocated array, bypassing all virtual dispatch.
 ///
-/// The tape array starts at `src.len() / 4` entries and is doubled on each
-/// `TapeOverflow` result, so parsing always completes without manual capacity
-/// tuning.
+/// `initial_capacity` controls how many [`TapeEntry`] slots the first
+/// allocation reserves.  Pass `None` to use the default of `src.len() / 4`,
+/// which is large enough for well-formed JSON without triggering a retry on
+/// typical inputs.  Pass `Some(n)` to hint a known-good size and avoid any
+/// retry allocation.  On overflow the capacity is doubled and the parse is
+/// retried automatically regardless of the initial hint.
 ///
 /// Only available on `x86_64` targets.  Returns `None` if the JSON is
 /// invalid or nesting exceeds [`MAX_JSON_DEPTH`] levels.
@@ -529,13 +532,16 @@ pub fn parse_to_tape_zmm_dyn<'a>(src: &'a str) -> Option<Tape<'a>> {
 /// #[cfg(target_arch = "x86_64")]
 /// {
 ///     use asmjson::parse_to_tape_zmm_tape;
-///     let tape = parse_to_tape_zmm_tape(r#"{"x":1}"#).unwrap();
+///     let tape = parse_to_tape_zmm_tape(r#"{"x":1}"#, None).unwrap();
 ///     use asmjson::JsonRef;
 ///     assert_eq!(tape.root().get("x").as_i64(), Some(1));
 /// }
 /// ```
 #[cfg(target_arch = "x86_64")]
-pub fn parse_to_tape_zmm_tape<'a>(src: &'a str) -> Option<Tape<'a>> {
+pub fn parse_to_tape_zmm_tape<'a>(
+    src: &'a str,
+    initial_capacity: Option<usize>,
+) -> Option<Tape<'a>> {
     assert!(
         std::is_x86_feature_detected!("avx512bw"),
         "parse_to_tape_zmm_tape requires AVX-512BW; \
@@ -551,8 +557,11 @@ pub fn parse_to_tape_zmm_tape<'a>(src: &'a str) -> Option<Tape<'a>> {
     let mut open_buf = [0u64; MAX_JSON_DEPTH];
     let mut unescape_buf = String::new();
 
-    // Start with a conservative capacity; double on overflow.
-    let mut capacity = (src.len() / 4).max(2);
+    // Start at the caller-supplied hint, or default to src.len()/4 entries.
+    // For well-formed JSON this default comfortably exceeds the tape length
+    // (each record is ~130 bytes and emits ~22 entries; 130/4 = 32.5 > 22),
+    // so no retry should be needed in practice.
+    let mut capacity = initial_capacity.unwrap_or_else(|| (src.len() / 4).max(2));
 
     loop {
         let mut tape_data: Vec<TapeEntry<'a>> = Vec::with_capacity(capacity);
@@ -1517,8 +1526,8 @@ mod tests {
         // support top-level scalars, but the tape variant does).
         let ref_tape = parse_to_tape(src, classify_zmm)
             .unwrap_or_else(|| panic!("reference rejected: {src:?}"));
-        let asm_tape =
-            parse_to_tape_zmm_tape(src).unwrap_or_else(|| panic!("zmm_tape rejected: {src:?}"));
+        let asm_tape = parse_to_tape_zmm_tape(src, None)
+            .unwrap_or_else(|| panic!("zmm_tape rejected: {src:?}"));
         assert_eq!(
             ref_tape.entries, asm_tape.entries,
             "tape mismatch for {src:?}"
@@ -1528,7 +1537,7 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     fn zmm_tape_rejects(src: &str) {
         assert!(
-            parse_to_tape_zmm_tape(src).is_none(),
+            parse_to_tape_zmm_tape(src, None).is_none(),
             "zmm_tape should reject {src:?}"
         );
     }
@@ -1662,7 +1671,8 @@ mod tests {
             s.push(']');
             s
         };
-        let tape = parse_to_tape_zmm_tape(&big).expect("overflow retry should succeed");
+        // Use Some(4) to guarantee at least one overflow retry regardless of input size.
+        let tape = parse_to_tape_zmm_tape(&big, Some(4)).expect("overflow retry should succeed");
         assert_eq!(tape.root().unwrap().array_iter().unwrap().count(), 200);
     }
 }
