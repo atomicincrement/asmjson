@@ -345,9 +345,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_OBJECT
     shl     r10, KIND_SHIFT
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
@@ -370,9 +369,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_ARRAY
     shl     r10, KIND_SHIFT
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
@@ -438,8 +436,8 @@ parse_json_zmm_tape:
     mov     r11, TAPE_KIND_STRING
     shl     r11, KIND_SHIFT
     or      r10, r11
-    movnti  qword ptr [rax], r10
-    movnti  qword ptr [rax + 8], rsi
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], rsi
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
@@ -472,8 +470,8 @@ parse_json_zmm_tape:
     mov     r11, TAPE_KIND_ESCAPED_STRING
     shl     r11, KIND_SHIFT
     or      r10, r11
-    movnti  qword ptr [rax], r10
-    movnti  qword ptr [rax + 8], rsi
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], rsi
     // Signal: tape contains at least one escaped entry.
     mov     rax, qword ptr [rbp + LOC_HAS_ESC_OUT]
     mov     byte ptr [rax], 1
@@ -585,8 +583,8 @@ parse_json_zmm_tape:
     mov     r11, TAPE_KIND_KEY
     shl     r11, KIND_SHIFT
     or      r10, r11
-    movnti  qword ptr [rax], r10
-    movnti  qword ptr [rax + 8], rsi
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], rsi
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
@@ -617,8 +615,8 @@ parse_json_zmm_tape:
     mov     r11, TAPE_KIND_ESCAPED_KEY
     shl     r11, KIND_SHIFT
     or      r10, r11
-    movnti  qword ptr [rax], r10
-    movnti  qword ptr [rax + 8], rsi
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], rsi
     // Signal: tape contains at least one escaped entry.
     mov     rax, qword ptr [rbp + LOC_HAS_ESC_OUT]
     mov     byte ptr [rax], 1
@@ -682,9 +680,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_OBJECT
     shl     r10, KIND_SHIFT
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
@@ -707,9 +704,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_ARRAY
     shl     r10, KIND_SHIFT
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
@@ -843,9 +839,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_END_OBJECT
     shl     r10, KIND_SHIFT
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
@@ -922,9 +917,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_END_ARRAY
     shl     r10, KIND_SHIFT
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
@@ -947,9 +941,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_OBJECT
     shl     r10, KIND_SHIFT
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
@@ -972,9 +965,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_START_ARRAY
     shl     r10, KIND_SHIFT
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
@@ -1072,9 +1064,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_END_OBJECT
     shl     r10, KIND_SHIFT
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
@@ -1110,9 +1101,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_END_ARRAY
     shl     r10, KIND_SHIFT
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
@@ -1172,7 +1162,6 @@ parse_json_zmm_tape:
     pop     r12
     pop     rbx
     pop     rbp
-    sfence
     ret
 
 // ===========================================================================
@@ -1212,9 +1201,8 @@ parse_json_zmm_tape:
     lea     rax, [r14 + rax*8]
     mov     r10, TAPE_KIND_BOOL
     shl     r10, KIND_SHIFT         // tag = 1<<60 | 0  (false)
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     mov     al, 1
     mov     rcx, qword ptr [rbp + LOC_COFF]
@@ -1224,9 +1212,8 @@ parse_json_zmm_tape:
     // Write Null entry (tag=0, ptr=0)
     lea     rax, [rbx + rbx]
     lea     rax, [r14 + rax*8]
-    xor     r10d, r10d
-    movnti  qword ptr [rax], r10
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], 0
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     mov     al, 1
     mov     rcx, qword ptr [rbp + LOC_COFF]
@@ -1239,9 +1226,8 @@ parse_json_zmm_tape:
     mov     r10, TAPE_KIND_BOOL
     shl     r10, KIND_SHIFT
     or      r10, 1                  // payload=1 (true)
-    movnti  qword ptr [rax], r10
-    xor     r10d, r10d
-    movnti  qword ptr [rax + 8], r10
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], 0
     inc     rbx
     mov     al, 1
     mov     rcx, qword ptr [rbp + LOC_COFF]
@@ -1330,8 +1316,8 @@ parse_json_zmm_tape:
     mov     r11, TAPE_KIND_NUMBER
     shl     r11, KIND_SHIFT
     or      r10, r11
-    movnti  qword ptr [rax], r10
-    movnti  qword ptr [rax + 8], rsi
+    mov     qword ptr [rax], r10
+    mov     qword ptr [rax + 8], rsi
     inc     rbx
     mov     al, 1
     mov     rcx, qword ptr [rbp + LOC_COFF]
