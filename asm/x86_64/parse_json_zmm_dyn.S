@@ -1110,10 +1110,67 @@ parse_json_zmm_dyn:
     ret
 
 .Lea_number:
-    // Validate: call is_valid_json_number_c(ptr=rsi, len=rdx)
-    // Save ptr/len to stack slots (LOC_ATOM_START / LOC_STR_START are stale
-    // at this point); r8 and r9 are caller-saved and would be clobbered by
-    // the call, so we must not rely on them afterwards.
+    // -----------------------------------------------------------------------
+    // SWAR fast path: if atom_len <= 8 and at least 8 source bytes remain
+    // after atom_ptr, test all bytes are ASCII digits via bit-trick:
+    //
+    //   t = (b | 0x80) - 0x30
+    //   b >= '0'  ↔  bit 7 of t = 1  (0x80 set, not consumed by borrow)
+    //   b <= '9'  ↔  low nibble of t <= 9  ↔  (t + 0x06) & 0x10 == 0
+    //
+    // Unused high bytes are filled with '0' (0x30) so they pass vacuously.
+    // A leading-zero guard rejects "01" etc.
+    // -----------------------------------------------------------------------
+    cmp     rdx, 8
+    ja      .Lea_number_validate           // len > 8: always use full validator
+
+    // Safety: need 8 readable bytes starting at rsi.
+    lea     rax, [rsi + 8]
+    cmp     rax, r13                        // rsi + 8 > src_end?
+    ja      .Lea_number_validate            // fewer than 8 bytes left: fall back
+
+    // Leading-zero guard: "0x" for x != nothing is invalid JSON.
+    cmp     rdx, 1
+    je      .Lea_swar_load
+    cmp     byte ptr [rsi], '0'
+    je      .Lea_number_validate            // starts with '0' and len > 1
+
+.Lea_swar_load:
+    // Load 8 raw bytes; fill unused high bytes (positions rdx..7) with '0'.
+    mov     rax, qword ptr [rsi]
+    mov     rcx, 8
+    sub     rcx, rdx                        // rcx = 8 - rdx
+    shl     rcx, 3                          // rcx = (8 - rdx) * 8 bits
+    mov     r8, -1
+    shr     r8, cl                          // r8 = mask: 0xFF in low rdx bytes, 0x00 above
+    mov     r9, 0x3030303030303030
+    and     rax, r8                         // zero the high (8-rdx) bytes
+    andn    r9, r8, r9                      // r9 = 0x30 in high bytes, 0 in low
+    or      rax, r9                         // rax = atom bytes ++ '0' padding
+
+    // SWAR digit check.
+    mov     r8, 0x8080808080808080
+    or      r8, rax                         // set top bit of every byte
+    mov     r9, 0x3030303030303030
+    sub     r8, r9                          // t = (b|0x80) - 0x30 per byte
+    // Lower-bound: bit 7 of every t-byte must be 1 (b >= '0').
+    mov     r9, r8
+    not     r9
+    mov     rax, 0x8080808080808080
+    test    r9, rax
+    jnz     .Lea_number_validate            // some byte < '0'
+    // Upper-bound: low nibble of every t-byte <= 9  ↔  (t+0x06)&0x10 == 0.
+    mov     r9, 0x0606060606060606
+    add     r8, r9
+    mov     r9, 0x1010101010101010
+    test    r8, r9
+    jnz     .Lea_number_validate            // some byte > '9'
+
+    // All bytes are valid digits — emit Number entry directly.
+    jmp     .Lea_number_emit
+
+.Lea_number_validate:
+    // Full validation path (handles '-', '.', 'e', leading zeros, etc.).
     mov     qword ptr [rbp + LOC_ATOM_START], rsi   // save ptr
     mov     qword ptr [rbp + LOC_STR_START],  rdx   // save len
     mov     rdi, rsi
@@ -1121,10 +1178,13 @@ parse_json_zmm_dyn:
     call    is_valid_json_number_c
     test    al, al
     jz      .Lea_fail
-    // Reload ptr/len from stack (r8/r9 clobbered by call above).
-    mov     rdi, rbx
+    // Reload ptr/len from stack.
     mov     rsi, qword ptr [rbp + LOC_ATOM_START]
     mov     rdx, qword ptr [rbp + LOC_STR_START]
+
+.Lea_number_emit:
+    // Call writer.number(ptr=rsi, len=rdx).
+    mov     rdi, rbx
     call    qword ptr [r14 + VTAB_NUMBER]
     mov     al, 1
     mov     rcx, qword ptr [rbp + LOC_COFF]

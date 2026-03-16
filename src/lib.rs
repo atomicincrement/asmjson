@@ -1499,7 +1499,26 @@ mod tests {
     #[test]
     fn zmm_tape_atoms() {
         for src in &[
-            "null", "true", "false", "0", "42", "-7", "3.14", "1e10", "-0.5e-3",
+            "null",
+            "true",
+            "false",
+            "0",
+            "42",
+            "-7",
+            "3.14",
+            "1e10",
+            "-0.5e-3",
+            // SWAR fast-path boundary cases: pure integers up to 8 bytes
+            "1",
+            "12",
+            "123",
+            "1234",
+            "12345",
+            "123456",
+            "1234567",
+            "12345678",
+            // Integers just beyond 8 bytes (validator path)
+            "123456789",
         ] {
             zmm_tape_matches_dyn(src);
         }
@@ -1581,5 +1600,10 @@ mod tests {
         zmm_tape_rejects("}");
         zmm_tape_rejects(r#"{"a":}"#);
         zmm_tape_rejects(r#"{"a":1"#);
+        // Leading zeros must be rejected (SWAR fast path must not bypass this).
+        zmm_tape_rejects("01");
+        zmm_tape_rejects("00");
+        zmm_tape_rejects("007");
+        zmm_tape_rejects("01234567"); // exactly 8 bytes, leading zero
     }
 }
