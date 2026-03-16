@@ -1170,3 +1170,105 @@ strings, long strings (>64 bytes), nested structures, escaped keys, whitespace
 variants, and rejection of malformed inputs.
 
 **Commit**: `84bb057` — feat: add parse_to_tape_zmm_tape direct-write assembly parser
+
+## Session 8 — Benchmarks and PAYLOAD_MASK widening
+
+### Benchmarking `parse_to_tape_zmm_tape` vs the field
+
+`cargo bench` was run to compare the three tape parsers: the Rust reference
+`zmm`, the dynamic-dispatch assembly `zmm_dyn`, and the new direct-write
+`zmm_tape`.
+
+| benchmark     | zmm (Rust) | zmm_dyn   | zmm_tape  | δ tape vs dyn |
+|---------------|-----------|-----------|-----------|---------------|
+| string_array  | 1.251 ms  | 0.959 ms  | 1.008 ms  | +5% slower    |
+| string_object | 1.709 ms  | 1.426 ms  | 1.554 ms  | +9% slower    |
+| mixed         | 14.85 ms  | 15.34 ms  | 11.86 ms  | -23% faster   |
+
+On purely string-heavy workloads the vtable-call overhead of `zmm_dyn` is
+negligible compared to the SIMD scan time, so the extra indirection costs
+nothing and `zmm_dyn` wins.  On `mixed` (twitter-style: many short integer,
+boolean, null, and nested-object tokens) the direct tape writes in `zmm_tape`
+avoid enough per-token overhead to win by 23%.
+
+### Widening PAYLOAD_MASK from 28 bits to 60 bits
+
+`TapeEntry` stores the kind in bits 63-60 and the payload in bits 59-0, giving
+60 bits of payload capacity.  The original constant used only the low 28 bits
+(`(1 << 28) - 1`), wasting bits 59-28 and capping string/array lengths
+unnecessarily.
+
+**Rust** (`src/tape.rs`): `PAYLOAD_MASK` changed to `u64::MAX >> 4` (bits 59-0).
+
+**Assembly** (`asm/x86_64/parse_json_zmm_tape.S`): the previous
+`and r10, 0x0FFFFFFF` could not be widened directly because x86-64 encodes
+`and` immediate as a 32-bit sign-extended value (max `0x7FFFFFFF`).  A 60-bit
+immediate would require a 64-bit `mov` + `and` pair.  Instead the mask is
+applied with a shift pair: `shl r10, 4` / `shr r10, 4`, which clears the top
+4 bits without needing a large immediate.  All ten masking sites in the file
+were updated.
+
+All 27 unit tests and 6 doctests pass after the change.
+
+**Commit**: `2c59a28` -- refactor: widen TapeEntry payload from 28 to 60 bits
+
+## Session 9 — Perf profiling of `parse_to_tape_zmm_tape`
+
+### What was done
+
+A tight-loop driver (`examples/perf_zmm_tape.rs`) was created to generate
+~10 MiB of mixed JSON (same generator as the criterion `bench_mixed` benchmark)
+and call `parse_to_tape_zmm_tape` 400 times.  The binary was built with
+`CARGO_PROFILE_RELEASE_DEBUG=true cargo build --release --example perf_zmm_tape`
+to preserve symbols, then profiled with
+`perf record -g --call-graph dwarf -F 999`.
+
+### Results
+
+Flat profile (top user-space functions):
+
+| % cycles | Function |
+|----------|----------|
+| 43.35 % | `parse_json_zmm_tape` |
+| 8.92 % | `perf_zmm_tape::main` (almost entirely `Tape` drop) |
+| 8.20 % | `<TapeEntry as Drop>::drop` |
+| 4.03 % | `asmjson::is_valid_json_number` |
+| 2.92 % | `is_valid_json_number_c` |
+
+`perf annotate` of `parse_json_zmm_tape` identified the hottest states:
+
+* **`.Lkey_end`** -- writing a `TapeEntry` for a key (`mov %r10,(%rax)` at 1.48 %
+  of function samples), plus surrounding bit-manipulation (kind-tag ORing,
+  pointer store, counter increments).  Every object key emits one entry, so
+  this is the dominant hot path on the twitter-like dataset.
+* **`.Lkey_chars`** -- inner scan loop for key bytes: `andn`/`or`/`shr`/`tzcnt`
+  bitmap walk plus a byte load and `\` check (0.58-0.78 % per instruction,
+  ~6 % of function samples collectively).
+* **`.Lafter_colon`** -- next-byte fetch and dispatch after `:` (~5 % of function),
+  with several `mov`/`tzcnt`/`add` instructions at 0.59-0.95 %.
+* **`.Lstring_chars`** -- tape write for string entries (0.89 %).
+* **`.Latom_chars`** -- the `call is_valid_json_number_c` instruction (0.88 %).
+
+Many hot instructions use frame-pointer-relative stack slots (`-0x80(%rbp)`,
+`-0x98(%rbp)`, etc.) for locals such as `chunk_len`, `string_bitmask`, and
+`colon_bitmask`.  These are spilled because the function uses more live values
+than the callee-saved registers can accommodate.
+
+### Design decisions
+
+No optimisations were applied in this session; profiling was observation-only.
+The main actionable findings are:
+
+1. **Drop overhead (~16 %)**: `TapeEntry::drop` checks `kind == EscapedString ||
+   EscapedKey` for every entry.  On mixed JSON most entries are plain strings or
+   scalars, so the check always fails, yet each still pays for one `kind()` decode
+   plus a branch.  A future optimisation could skip the drop loop by tracking
+   escape counts separately or keeping escaped entries in a side-vector.
+2. **Number validation (~7 %)**: `is_valid_json_number` + `is_valid_json_number_c`
+   together consume 7 % of cycles.  Inlining or simplifying the validator could
+   recover meaningful throughput, especially for the integer-heavy mixed workload.
+3. **Stack spills in hot loops**: register pressure forces `chunk_len` and the two
+   bitmask locals to memory.  Restructuring locals or reducing live-variable count
+   could reduce load/store traffic in `.Lkey_chars` and `.Lafter_colon`.
+
+**Commit**: n/a -- profiling only, no source changes
