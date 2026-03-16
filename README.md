@@ -8,6 +8,12 @@ A fast JSON parser that classifies 64 bytes at a time using SIMD or portable
 SWAR (SIMD-Within-A-Register) bit tricks, enabling entire whitespace runs and
 string bodies to be skipped in a single operation.
 
+> **⚠️ Experimental — not production ready.**  
+> This crate is a research and benchmarking project.  The API is unstable, test
+> coverage is incomplete, and the hand-written assembly has not been audited for
+> safety or correctness under adversarial input.  Use `serde_json` or `sonic-rs`
+> for production workloads.
+
 ## Quick start
 
 ```rust
