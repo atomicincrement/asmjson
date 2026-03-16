@@ -67,6 +67,10 @@
 //   r14  = tape_ptr    (callee-saved; base of the TapeEntry array)
 //   r15  = frames_buf  (callee-saved; &[u8; 64], one byte per nesting level)
 //
+// Hot scalar registers (caller-saved; spilled to stack only around rare external calls):
+//   r8   = chunk_len   (live copy of LOC_CHUNK_LEN; ≤ 64)
+//   r9   = pos         (live copy of LOC_POS; byte offset of current chunk start)
+//
 // Inner-loop register:
 //   rcx  = chunk_offset (0..chunk_len, current bit index within the chunk)
 //
@@ -74,7 +78,7 @@
 //   r10  = address of target state
 //   r11  = address of EOF handler
 //
-// Scratch: rax, rdx, rsi, rdi, r8, r9  (all caller-saved)
+// Scratch: rax, rdx, rsi, rdi  (all caller-saved)
 //
 // ---------------------------------------------------------------------------
 // Stack frame layout  (rbp-relative)
@@ -212,7 +216,7 @@ parse_json_zmm_tape:
     xor     eax, eax
     xor     ebx, ebx                                    // tape_len = 0
     mov     qword ptr [rbp + LOC_FDEPTH],    rax        // frames_depth = 0
-    mov     qword ptr [rbp + LOC_POS],       rax        // pos = 0
+    xor     r9d, r9d                                    // pos = 0  (r9 = live copy)
     mov     qword ptr [rbp + LOC_STR_START], rax
     mov     qword ptr [rbp + LOC_ATOM_START],rax
     mov     byte  ptr [rbp + LOC_STR_ESC],   al         // str_escaped = false
@@ -220,7 +224,7 @@ parse_json_zmm_tape:
     mov     qword ptr [rbp + LOC_KEY_LEN],   rax
     mov     byte  ptr [rbp + LOC_KEY_ESC],   al         // key_escaped = false
     mov     byte  ptr [rbp + LOC_AFT_COMMA], al         // after_comma = false
-    mov     qword ptr [rbp + LOC_CHUNK_LEN], rax        // chunk_len = 0 (first iteration)
+    xor     r8d, r8d                                    // chunk_len = 0  (r8 = live copy)
     mov     qword ptr [rbp + LOC_OPEN_DEPTH],rax        // open_depth = 0
 
     // First state is ValueWhitespace; set up r10/r11 and fall into chunk_fetch.
@@ -232,13 +236,11 @@ parse_json_zmm_tape:
 // .Lchunk_fetch  — outer loop: advance pos, classify next 64-byte chunk
 // ===========================================================================
 .Lchunk_fetch:
-    // Advance pos by chunk_len (0 on first entry since stack is zeroed).
-    mov     rax, qword ptr [rbp + LOC_CHUNK_LEN]
-    add     qword ptr [rbp + LOC_POS], rax
+    // Advance pos by chunk_len (0 on first entry since r8/r9 are zeroed).
+    add     r9, r8
 
     // Compute bytes remaining.
-    mov     rax, qword ptr [rbp + LOC_POS]
-    lea     rdx, [r12 + rax]        // rdx = src_base + pos  (current chunk start)
+    lea     rdx, [r12 + r9]         // rdx = src_base + pos  (current chunk start)
     cmp     rdx, r13
     jae     .Lchunk_eof             // pos >= src_len → handle end of source
 
@@ -249,7 +251,7 @@ parse_json_zmm_tape:
     jbe     .Lclassify_partial      // fewer than 64 bytes → use masked load
     mov     rsi, 64
 .Lclassify_partial:
-    mov     qword ptr [rbp + LOC_CHUNK_LEN], rsi
+    mov     r8, rsi                 // chunk_len = rsi  (r8 = live copy)
 
     // -----------------------------------------------------------------------
     // Inline AVX-512BW classification
@@ -264,16 +266,16 @@ parse_json_zmm_tape:
 .Lclassify_full:
     mov     rax, -1
 .Lclassify_do:
-    lea     r9, [rip + .Lzmm_space]
+    lea     rdi, [rip + .Lzmm_space]
     kmovq   k1, rax
     vmovdqu8 zmm0{k1}{z}, zmmword ptr [rdx]
 
-    vpcmpub  k2, zmm0, zmmword ptr [r9       ], 2   // whitespace: byte <= 0x20
-    vpcmpeqb k3, zmm0, zmmword ptr [r9 +  64]       // quotes
-    vpcmpeqb k4, zmm0, zmmword ptr [r9 + 128]       // backslashes
-    vpcmpeqb k5, zmm0, zmmword ptr [r9 + 192]       // comma
-    vpcmpeqb k6, zmm0, zmmword ptr [r9 + 256]       // '}'
-    vpcmpeqb k7, zmm0, zmmword ptr [r9 + 320]       // ']'
+    vpcmpub  k2, zmm0, zmmword ptr [rdi       ], 2  // whitespace: byte <= 0x20
+    vpcmpeqb k3, zmm0, zmmword ptr [rdi +  64]      // quotes
+    vpcmpeqb k4, zmm0, zmmword ptr [rdi + 128]      // backslashes
+    vpcmpeqb k5, zmm0, zmmword ptr [rdi + 192]      // comma
+    vpcmpeqb k6, zmm0, zmmword ptr [rdi + 256]      // '}'
+    vpcmpeqb k7, zmm0, zmmword ptr [rdi + 320]      // ']'
 
     korq    k5, k5, k6
     korq    k5, k5, k7
@@ -306,10 +308,10 @@ parse_json_zmm_tape:
     shr     rax, cl
     tzcnt   rax, rax
     add     rcx, rax
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jae     .Lrefetch_value_whitespace
 
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, r12
     movzx   eax, byte ptr [rax + rcx]
     cmp     al, '{'
@@ -319,12 +321,12 @@ parse_json_zmm_tape:
     cmp     al, '"'
     je      .Lvw_open_string
     // else: atom
-    mov     rdx, qword ptr [rbp + LOC_POS]
+    mov     rdx, r9
     add     rdx, rcx
     mov     qword ptr [rbp + LOC_ATOM_START], rdx
     inc     rcx
     lea     r11, [rip + .Latom_eof_flush]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Latom_chars
     lea     r10, [rip + .Latom_chars]
     jmp     .Lchunk_fetch
@@ -350,7 +352,7 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lobject_start
     lea     r10, [rip + .Lobject_start]
     jmp     .Lchunk_fetch
@@ -374,20 +376,20 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Larray_start
     lea     r10, [rip + .Larray_start]
     jmp     .Lchunk_fetch
 
 .Lvw_open_string:
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, rcx
     inc     rax
     mov     qword ptr [rbp + LOC_STR_START], rax
     mov     byte ptr [rbp + LOC_STR_ESC], 0
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lstring_chars
     lea     r10, [rip + .Lstring_chars]
     jmp     .Lchunk_fetch
@@ -410,10 +412,10 @@ parse_json_zmm_tape:
     shr     rax, cl
     tzcnt   rax, rax
     add     rcx, rax
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jae     .Lrefetch_string_chars
 
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, r12
     movzx   eax, byte ptr [rax + rcx]
     cmp     al, '\\'
@@ -422,7 +424,7 @@ parse_json_zmm_tape:
     // '"' — end of string.  raw slice: [str_start .. pos + chunk_offset]
     mov     rsi, qword ptr [rbp + LOC_STR_START]
     lea     rsi, [r12 + rsi]                        // absolute ptr
-    mov     rdx, qword ptr [rbp + LOC_POS]
+    mov     rdx, r9
     add     rdx, rcx
     sub     rdx, qword ptr [rbp + LOC_STR_START]    // len
     cmp     byte ptr [rbp + LOC_STR_ESC], 0
@@ -441,7 +443,7 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lafter_value
     lea     r10, [rip + .Lafter_value]
     jmp     .Lchunk_fetch
@@ -449,6 +451,9 @@ parse_json_zmm_tape:
 .Lsc_emit_escaped:
     // Owned: unescape into buf, then move to Box<str>, write EscapedString entry.
     mov     qword ptr [rbp + LOC_COFF], rcx
+    // Spill r8/r9 (chunk_len/pos) — external calls clobber caller-saved registers.
+    mov     qword ptr [rbp + LOC_CHUNK_LEN], r8
+    mov     qword ptr [rbp + LOC_POS],       r9
     mov     rdi, rsi                               // arg1: raw_ptr
     mov     rsi, rdx                               // arg2: raw_len
     mov     rdx, qword ptr [rbp + LOC_UNESCAPE]   // arg3: *mut String
@@ -459,6 +464,9 @@ parse_json_zmm_tape:
     lea     rsi, [rbp + LOC_ATOM_START]
     lea     rdx, [rbp + LOC_STR_START]
     call    tape_take_box_str
+    // Restore r8/r9 after external calls.
+    mov     r8, qword ptr [rbp + LOC_CHUNK_LEN]
+    mov     r9, qword ptr [rbp + LOC_POS]
     mov     rsi, qword ptr [rbp + LOC_ATOM_START]  // box_ptr
     mov     rdx, qword ptr [rbp + LOC_STR_START]   // box_len
     // Write EscapedString entry
@@ -479,7 +487,7 @@ parse_json_zmm_tape:
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lafter_value
     lea     r10, [rip + .Lafter_value]
     jmp     .Lchunk_fetch
@@ -488,7 +496,7 @@ parse_json_zmm_tape:
     mov     byte ptr [rbp + LOC_STR_ESC], 1
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lstring_chars
     lea     r10, [rip + .Lstring_chars]
     jmp     .Lchunk_fetch
@@ -511,10 +519,10 @@ parse_json_zmm_tape:
     shr     rax, cl
     tzcnt   rax, rax
     add     rcx, rax
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jae     .Lrefetch_key_chars
 
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, r12
     movzx   eax, byte ptr [rax + rcx]
     cmp     al, '\\'
@@ -524,7 +532,7 @@ parse_json_zmm_tape:
     mov     rax, qword ptr [rbp + LOC_STR_START]
     lea     rax, [r12 + rax]
     mov     qword ptr [rbp + LOC_KEY_PTR], rax
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, rcx
     sub     rax, qword ptr [rbp + LOC_STR_START]
     mov     qword ptr [rbp + LOC_KEY_LEN], rax
@@ -532,7 +540,7 @@ parse_json_zmm_tape:
     mov     byte ptr [rbp + LOC_KEY_ESC], al
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lkey_end
     lea     r10, [rip + .Lkey_end]
     jmp     .Lchunk_fetch
@@ -541,7 +549,7 @@ parse_json_zmm_tape:
     mov     byte ptr [rbp + LOC_STR_ESC], 1
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lkey_chars
     lea     r10, [rip + .Lkey_chars]
     jmp     .Lchunk_fetch
@@ -560,10 +568,10 @@ parse_json_zmm_tape:
     shr     rax, cl
     tzcnt   rax, rax
     add     rcx, rax
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jae     .Lrefetch_key_end
 
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, r12
     movzx   eax, byte ptr [rax + rcx]
     cmp     al, ':'
@@ -588,7 +596,7 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lafter_colon
     lea     r10, [rip + .Lafter_colon]
     jmp     .Lchunk_fetch
@@ -596,6 +604,9 @@ parse_json_zmm_tape:
 .Lke_emit_escaped:
     // Owned escaped key: unescape, box, write EscapedKey entry.
     mov     qword ptr [rbp + LOC_COFF], rcx
+    // Spill r8/r9 (chunk_len/pos) — external calls clobber caller-saved registers.
+    mov     qword ptr [rbp + LOC_CHUNK_LEN], r8
+    mov     qword ptr [rbp + LOC_POS],       r9
     mov     rdi, qword ptr [rbp + LOC_KEY_PTR]    // raw_ptr
     mov     rsi, qword ptr [rbp + LOC_KEY_LEN]    // raw_len
     mov     rdx, qword ptr [rbp + LOC_UNESCAPE]   // *mut String
@@ -604,6 +615,9 @@ parse_json_zmm_tape:
     lea     rsi, [rbp + LOC_ATOM_START]
     lea     rdx, [rbp + LOC_STR_START]
     call    tape_take_box_str
+    // Restore r8/r9 after external calls.
+    mov     r8, qword ptr [rbp + LOC_CHUNK_LEN]
+    mov     r9, qword ptr [rbp + LOC_POS]
     mov     rsi, qword ptr [rbp + LOC_ATOM_START]  // box_ptr
     mov     rdx, qword ptr [rbp + LOC_STR_START]   // box_len
     // Write EscapedKey entry
@@ -624,7 +638,7 @@ parse_json_zmm_tape:
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lafter_colon
     lea     r10, [rip + .Lafter_colon]
     jmp     .Lchunk_fetch
@@ -643,10 +657,10 @@ parse_json_zmm_tape:
     shr     rax, cl
     tzcnt   rax, rax
     add     rcx, rax
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jae     .Lrefetch_after_colon
 
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, r12
     movzx   eax, byte ptr [rax + rcx]
     cmp     al, '{'
@@ -656,12 +670,12 @@ parse_json_zmm_tape:
     cmp     al, '"'
     je      .Lac_open_string
     // atom
-    mov     rdx, qword ptr [rbp + LOC_POS]
+    mov     rdx, r9
     add     rdx, rcx
     mov     qword ptr [rbp + LOC_ATOM_START], rdx
     inc     rcx
     lea     r11, [rip + .Latom_eof_flush]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Latom_chars
     lea     r10, [rip + .Latom_chars]
     jmp     .Lchunk_fetch
@@ -685,7 +699,7 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lobject_start
     lea     r10, [rip + .Lobject_start]
     jmp     .Lchunk_fetch
@@ -709,20 +723,20 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Larray_start
     lea     r10, [rip + .Larray_start]
     jmp     .Lchunk_fetch
 
 .Lac_open_string:
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, rcx
     inc     rax
     mov     qword ptr [rbp + LOC_STR_START], rax
     mov     byte ptr [rbp + LOC_STR_ESC], 0
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lstring_chars
     lea     r10, [rip + .Lstring_chars]
     jmp     .Lchunk_fetch
@@ -740,13 +754,13 @@ parse_json_zmm_tape:
     shr     rax, cl
     tzcnt   rax, rax
     add     rcx, rax
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jae     .Lrefetch_atom_chars
 
     // Emit the atom from [atom_start .. pos + chunk_offset].
     mov     rsi, qword ptr [rbp + LOC_ATOM_START]
     lea     rsi, [r12 + rsi]
-    mov     rdx, qword ptr [rbp + LOC_POS]
+    mov     rdx, r9
     add     rdx, rcx
     sub     rdx, qword ptr [rbp + LOC_ATOM_START]
     call    .Lemit_atom
@@ -754,7 +768,7 @@ parse_json_zmm_tape:
     jz      .Lerror
 
     // Dispatch on the delimiter byte.
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, r12
     movzx   eax, byte ptr [rax + rcx]
     cmp     al, '}'
@@ -766,7 +780,7 @@ parse_json_zmm_tape:
     // whitespace delimiter
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lafter_value
     lea     r10, [rip + .Lafter_value]
     jmp     .Lchunk_fetch
@@ -787,10 +801,10 @@ parse_json_zmm_tape:
     shr     rax, cl
     tzcnt   rax, rax
     add     rcx, rax
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jae     .Lrefetch_object_start
 
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, r12
     movzx   eax, byte ptr [rax + rcx]
     cmp     al, '"'
@@ -800,14 +814,14 @@ parse_json_zmm_tape:
     jmp     .Lerror
 
 .Los_key:
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, rcx
     inc     rax
     mov     qword ptr [rbp + LOC_STR_START], rax
     mov     byte ptr [rbp + LOC_STR_ESC], 0
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lkey_chars
     lea     r10, [rip + .Lkey_chars]
     jmp     .Lchunk_fetch
@@ -844,7 +858,7 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lafter_value
     lea     r10, [rip + .Lafter_value]
     jmp     .Lchunk_fetch
@@ -865,10 +879,10 @@ parse_json_zmm_tape:
     shr     rax, cl
     tzcnt   rax, rax
     add     rcx, rax
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jae     .Lrefetch_array_start
 
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, r12
     movzx   eax, byte ptr [rax + rcx]
     cmp     al, ']'
@@ -880,12 +894,12 @@ parse_json_zmm_tape:
     cmp     al, '"'
     je      .Las_open_string
     // atom
-    mov     rdx, qword ptr [rbp + LOC_POS]
+    mov     rdx, r9
     add     rdx, rcx
     mov     qword ptr [rbp + LOC_ATOM_START], rdx
     inc     rcx
     lea     r11, [rip + .Latom_eof_flush]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Latom_chars
     lea     r10, [rip + .Latom_chars]
     jmp     .Lchunk_fetch
@@ -922,7 +936,7 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lafter_value
     lea     r10, [rip + .Lafter_value]
     jmp     .Lchunk_fetch
@@ -946,7 +960,7 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lobject_start
     lea     r10, [rip + .Lobject_start]
     jmp     .Lchunk_fetch
@@ -970,20 +984,20 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Larray_start
     lea     r10, [rip + .Larray_start]
     jmp     .Lchunk_fetch
 
 .Las_open_string:
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, rcx
     inc     rax
     mov     qword ptr [rbp + LOC_STR_START], rax
     mov     byte ptr [rbp + LOC_STR_ESC], 0
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lstring_chars
     lea     r10, [rip + .Lstring_chars]
     jmp     .Lchunk_fetch
@@ -1002,10 +1016,10 @@ parse_json_zmm_tape:
     shr     rax, cl
     tzcnt   rax, rax
     add     rcx, rax
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jae     .Lrefetch_after_value
 
-    mov     rax, qword ptr [rbp + LOC_POS]
+    mov     rax, r9
     add     rax, r12
     movzx   eax, byte ptr [rax + rcx]
 
@@ -1025,14 +1039,14 @@ parse_json_zmm_tape:
 .Lav_comma_obj:
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lobject_start_body
     lea     r10, [rip + .Lobject_start_body]
     jmp     .Lchunk_fetch
 .Lav_comma_arr:
     inc     rcx
     lea     r11, [rip + .Lerror_from_r11]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Larray_start_body
     lea     r10, [rip + .Larray_start_body]
     jmp     .Lchunk_fetch
@@ -1069,7 +1083,7 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lafter_value
     lea     r10, [rip + .Lafter_value]
     jmp     .Lchunk_fetch
@@ -1106,7 +1120,7 @@ parse_json_zmm_tape:
     inc     rbx
     inc     rcx
     lea     r11, [rip + .Leof_after_value]
-    cmp     rcx, qword ptr [rbp + LOC_CHUNK_LEN]
+    cmp     rcx, r8
     jb      .Lafter_value
     lea     r10, [rip + .Lafter_value]
     jmp     .Lchunk_fetch
@@ -1122,7 +1136,7 @@ parse_json_zmm_tape:
 .Latom_eof_flush:
     mov     rsi, qword ptr [rbp + LOC_ATOM_START]
     lea     rsi, [r12 + rsi]
-    mov     rdx, qword ptr [rbp + LOC_POS]
+    mov     rdx, r9
     sub     rdx, qword ptr [rbp + LOC_ATOM_START]
     call    .Lemit_atom
     test    al, al
@@ -1295,11 +1309,17 @@ parse_json_zmm_tape:
 
 .Lea_number_validate:
     // Full validation path (handles '-', '.', 'e', leading zeros, etc.).
-    mov     qword ptr [rbp + LOC_ATOM_START], rsi   // save ptr (r8/r9 clobbered by call)
+    mov     qword ptr [rbp + LOC_ATOM_START], rsi   // save ptr
     mov     qword ptr [rbp + LOC_STR_START],  rdx   // save len
+    // Spill r8/r9 (chunk_len/pos) — is_valid_json_number_c clobbers caller-saved regs.
+    mov     qword ptr [rbp + LOC_CHUNK_LEN],  r8
+    mov     qword ptr [rbp + LOC_POS],        r9
     mov     rdi, rsi
     mov     rsi, rdx
     call    is_valid_json_number_c
+    // Restore r8/r9.
+    mov     r8, qword ptr [rbp + LOC_CHUNK_LEN]
+    mov     r9, qword ptr [rbp + LOC_POS]
     test    al, al
     jz      .Lea_fail
     // Reload ptr/len
