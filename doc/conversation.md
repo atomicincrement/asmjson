@@ -1029,3 +1029,28 @@ Fixed by saving pointer and length to the stack (`LOC_ATOM_START` / `LOC_STR_STA
 **Results**: All 18 unit tests and 5 doctests pass with zero warnings.  The doctest `assert_eq!(tape.root().get("x").as_i64(), Some(1))` passes correctly.
 
 **Commit**: `944d97f` — feat: add parse_to_tape_zmm_dyn Rust entrypoint with C-ABI vtable
+
+---
+
+## Session 6 — Benchmarking `parse_to_tape_zmm_dyn`
+
+### What was done
+
+Added `asmjson/zmm_dyn` as a Criterion benchmark case in all three existing groups (`string_array`, `string_object`, `mixed`) in [benches/parse.rs](benches/parse.rs), gated on `#[cfg(target_arch = "x86_64")]` so it is silently skipped on other platforms.
+
+### Results (10 MiB inputs, release build, x86_64)
+
+| group         | asmjson/zmm   | asmjson/zmm_dyn | asmjson/u64  | sonic-rs      |
+|---------------|---------------|-----------------|--------------|---------------|
+| string_array  | 8.48 GiB/s    | 7.95 GiB/s      | 6.88 GiB/s   | 7.15 GiB/s    |
+| string_object | 5.77 GiB/s    | 5.47 GiB/s      | 4.68 GiB/s   | 4.08 GiB/s    |
+| mixed         | 451 MiB/s     | 445 MiB/s       | 448 MiB/s    | 484 MiB/s     |
+
+`zmm_dyn` is ~6–8 % slower than the pure-Rust `zmm` path on the string-heavy workloads.  The overhead comes from the two extra indirect calls (through `ZmmVtab`) per parsed token compared with the inlined fast paths in the Rust state machine.  On the mixed workload (many small numbers, booleans, and structural tokens) the gap closes to ~1 % because the vtable-call overhead is a smaller fraction of the per-token work.
+
+### Design decisions
+
+No changes were made to the vtable or trampoline design.  The benchmark baseline is the Rust `asmjson/zmm` path rather than a dedicated "no-vtable" comparison, which keeps the measurement directly actionable: the assembly entrypoint needs to match or beat the Rust zmm path to justify its complexity.
+
+**Commit**: `6525c72` — bench: add asmjson/zmm_dyn to all three criterion groups
+
