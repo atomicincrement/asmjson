@@ -122,7 +122,8 @@ unsafe extern "C" {
     ///
     /// Writes [`TapeEntry`] values directly into the pre-allocated `tape_ptr`
     /// array.  On success sets `*tape_len_out` to the number of entries written
-    /// and returns `true`.
+    /// and returns `true`.  Sets `*has_escapes_out` to `true` if any
+    /// `EscapedString` or `EscapedKey` entry was written.
     fn parse_json_zmm_tape(
         src_ptr: *const u8,
         src_len: usize,
@@ -131,6 +132,7 @@ unsafe extern "C" {
         frames_buf: *mut u8,
         open_buf: *mut u64,
         unescape_buf: *mut String,
+        has_escapes_out: *mut bool,
     ) -> bool;
 }
 
@@ -533,6 +535,7 @@ pub fn parse_to_tape_zmm_tape<'a>(src: &'a str) -> Option<Tape<'a>> {
     let mut open_buf = [0u64; MAX_JSON_DEPTH];
     let mut unescape_buf = String::new();
     let mut tape_len: usize = 0;
+    let mut has_escapes: bool = false;
 
     // SAFETY:
     //   • `tape_data` has capacity `src.len() + 2`, which is always enough
@@ -552,13 +555,17 @@ pub fn parse_to_tape_zmm_tape<'a>(src: &'a str) -> Option<Tape<'a>> {
             frames_buf.as_mut_ptr() as *mut u8,
             open_buf.as_mut_ptr(),
             &raw mut unescape_buf,
+            &raw mut has_escapes,
         )
     };
 
     if ok {
         // SAFETY: assembly wrote exactly `tape_len` initialised entries.
         unsafe { tape_data.set_len(tape_len) };
-        Some(Tape { entries: tape_data })
+        Some(Tape {
+            entries: tape_data,
+            has_escapes,
+        })
     } else {
         None
     }

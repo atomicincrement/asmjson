@@ -18,7 +18,8 @@
 //       size_t        *tape_len_out,  // rcx  — receives token count on success
 //       uint8_t       *frames_buf,    // r8   — [FrameKind; 64], u8 per entry
 //       uint64_t      *open_buf,      // r9   — [usize; 64] backfill index stack
-//       void          *unescape_buf   // [rsp+8] — *mut String for escape decoding
+//       void          *unescape_buf,  // [rsp+8]  — *mut String for escape decoding
+//       bool          *has_escapes_out // [rsp+16] — written to 1 if any EscapedString/EscapedKey
 //   );
 //   Returns: al = 1 on success, 0 on error.
 //
@@ -84,6 +85,7 @@
 // After five pushes  rsp = rbp - 40.  sub rsp, 152  →  rsp = rbp - 192.
 // 192 % 16 == 0  ✓  (required for ABI-aligned calls)
 //
+//   [rbp +24]  has_escapes_out ptr      (8th arg, caller's stack slot)
 //   [rbp +16]  unescape_buf ptr         (7th arg, caller's stack slot)
 //   [rbp + 8]  return address
 //   [rbp + 0]  saved rbp
@@ -134,6 +136,7 @@
 .equ LOC_TLEN_OUT,    -176     // tape_len_out pointer
 .equ LOC_OPEN_BUF,    -184     // open_buf pointer
 .equ LOC_OPEN_DEPTH,  -192     // current open-stack depth
+.equ LOC_HAS_ESC_OUT, +24      // has_escapes_out pointer (8th arg, caller's stack)
 
 // TapeEntryKind discriminants (bits 63-60 of tag_payload)
 .equ TAPE_KIND_NULL,           0
@@ -469,6 +472,9 @@ parse_json_zmm_tape:
     or      r10, r11
     mov     qword ptr [rax], r10
     mov     qword ptr [rax + 8], rsi
+    // Signal: tape contains at least one escaped entry.
+    mov     rax, qword ptr [rbp + LOC_HAS_ESC_OUT]
+    mov     byte ptr [rax], 1
     inc     rbx
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx
@@ -611,6 +617,9 @@ parse_json_zmm_tape:
     or      r10, r11
     mov     qword ptr [rax], r10
     mov     qword ptr [rax + 8], rsi
+    // Signal: tape contains at least one escaped entry.
+    mov     rax, qword ptr [rbp + LOC_HAS_ESC_OUT]
+    mov     byte ptr [rax], 1
     inc     rbx
     mov     rcx, qword ptr [rbp + LOC_COFF]
     inc     rcx

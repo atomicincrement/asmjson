@@ -388,6 +388,24 @@ impl<'a> TapeEntry<'a> {
 #[derive(Debug)]
 pub struct Tape<'a> {
     pub entries: Vec<TapeEntry<'a>>,
+    /// True if any entry in the tape is `EscapedString` or `EscapedKey`
+    /// (i.e. owns a heap-allocated `Box<str>`).  When false, `Drop` can skip
+    /// per-element destructor calls and free the backing allocation directly.
+    pub(crate) has_escapes: bool,
+}
+
+impl<'a> Drop for Tape<'a> {
+    fn drop(&mut self) {
+        if !self.has_escapes {
+            // No entry owns heap memory: skip per-element Drop calls and just
+            // free the Vec's backing allocation.
+            // SAFETY: every TapeEntry either borrows from the source JSON
+            // (String/Key/Number) or contains no pointer (Null/Bool/StartObject
+            // etc).  None own a Box<str>, so there is nothing to free per-element.
+            unsafe { self.entries.set_len(0) };
+        }
+        // self.entries drops here; with len==0 no element destructors run.
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +416,8 @@ pub(crate) struct TapeWriter<'a> {
     entries: Vec<TapeEntry<'a>>,
     /// Indices of unmatched `StartObject` / `StartArray` waiting for backfill.
     open: Vec<usize>,
+    /// Set to `true` when any escaped string or key is pushed.
+    has_escapes: bool,
 }
 
 impl<'a> TapeWriter<'a> {
@@ -405,6 +425,7 @@ impl<'a> TapeWriter<'a> {
         Self {
             entries: Vec::new(),
             open: Vec::new(),
+            has_escapes: false,
         }
     }
 }
@@ -425,12 +446,14 @@ impl<'a> JsonWriter<'a> for TapeWriter<'a> {
         self.entries.push(TapeEntry::string_entry(s));
     }
     fn escaped_string(&mut self, s: Box<str>) {
+        self.has_escapes = true;
         self.entries.push(TapeEntry::escaped_string_entry(s));
     }
     fn key(&mut self, s: &'a str) {
         self.entries.push(TapeEntry::key_entry(s));
     }
     fn escaped_key(&mut self, s: Box<str>) {
+        self.has_escapes = true;
         self.entries.push(TapeEntry::escaped_key_entry(s));
     }
     fn start_object(&mut self) {
@@ -461,6 +484,7 @@ impl<'a> JsonWriter<'a> for TapeWriter<'a> {
         if self.open.is_empty() {
             Some(Tape {
                 entries: self.entries,
+                has_escapes: self.has_escapes,
             })
         } else {
             None
