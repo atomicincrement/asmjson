@@ -190,7 +190,7 @@ fn gen_mixed(target_bytes: usize) -> String {
         let score = if i % 3 == 0 {
             "null".to_string()
         } else {
-            format!("{:.2}", i as f64 * 0.5)
+            format!("{}", i / 2)
         };
         out.push_str(&format!(
             r#"{{"id":{i},"name":"item{i}","active":{active},"score":{score},"tags":["{tag_a}","{tag_b}"],"meta":{{"x":{x},"y":{y}}}}}"#,
