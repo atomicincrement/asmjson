@@ -1272,3 +1272,47 @@ The main actionable findings are:
    could reduce load/store traffic in `.Lkey_chars` and `.Lafter_colon`.
 
 **Commit**: n/a -- profiling only, no source changes
+
+## Session 10 — Skip TapeEntry drops via Tape::has_escapes
+
+### What was done
+
+Profiling showed ~16 % of cycles spent in `<TapeEntry as Drop>::drop`, which
+checks `kind == EscapedString || EscapedKey` for every entry even when the
+tape contains none.  The fix: add a `has_escapes: bool` field to `Tape` and
+skip per-element destructors when it is `false`.
+
+**Changes:**
+
+* `src/tape.rs` — `Tape` gains `pub(crate) has_escapes: bool`.  A `Drop for
+  Tape` impl is added: when `!has_escapes` it calls `unsafe { self.entries.set_len(0) }`
+  before the Vec drops, so the backing allocation is freed without invoking
+  `TapeEntry::drop` on each element.  `TapeWriter` gains the same field,
+  set to `true` inside `escaped_string` and `escaped_key`, then forwarded to
+  `Tape` in `finish()`.
+
+* `src/lib.rs` — `parse_json_zmm_tape` extern declaration gains an 8th
+  argument `has_escapes_out: *mut bool`.  `parse_to_tape_zmm_tape` initialises
+  `let mut has_escapes = false`, passes `&raw mut has_escapes` to the assembly,
+  and propagates it into the returned `Tape`.
+
+* `asm/x86_64/parse_json_zmm_tape.S` — documents the new 8th argument
+  (`[rbp+24]`, `.equ LOC_HAS_ESC_OUT, +24`).  Both `.Lsc_emit_escaped` and
+  `.Lke_emit_escaped` store `1` to `*has_escapes_out` immediately after
+  writing the tape entry. No new stack space needed (the argument lives in
+  the caller's frame above the saved `rbp`).
+
+### Design decisions
+
+Setting the flag in the assembly at the two emit sites keeps the hot paths
+(plain strings, keys, numbers) unchanged.  The alternative of scanning the
+tape after parsing would have been O(n) on every call.
+
+`TapeEntry::drop` is kept unchanged for correctness when entries are used
+outside a `Tape` (e.g. constructed in tests).
+
+### Results
+
+All 27 unit tests and 6 doctests pass.
+
+**Commit**: `3ec8fba` -- perf: skip TapeEntry drops via Tape::has_escapes flag
