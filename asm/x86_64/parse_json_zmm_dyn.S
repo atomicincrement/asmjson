@@ -136,18 +136,19 @@
 .equ LOC_DELIMS,      -160
 .equ LOC_COFF,        -168     // saved chunk_offset around vtable calls
 
-// Vtable offsets for dyn JsonWriter
-.equ VTAB_NULL,           24
-.equ VTAB_BOOL_VAL,       32
-.equ VTAB_NUMBER,         40
-.equ VTAB_STRING,         48
-.equ VTAB_ESCAPED_STRING, 56
-.equ VTAB_KEY,            64
-.equ VTAB_ESCAPED_KEY,    72
-.equ VTAB_START_OBJECT,   80
-.equ VTAB_END_OBJECT,     88
-.equ VTAB_START_ARRAY,    96
-.equ VTAB_END_ARRAY,      104
+// Vtable offsets for ZmmVtab (#[repr(C)], 8 bytes per fn-pointer)
+//   Matches struct ZmmVtab field order in lib.rs exactly.
+.equ VTAB_NULL,            0
+.equ VTAB_BOOL_VAL,        8
+.equ VTAB_NUMBER,         16
+.equ VTAB_STRING,         24
+.equ VTAB_ESCAPED_STRING, 32
+.equ VTAB_KEY,            40
+.equ VTAB_ESCAPED_KEY,    48
+.equ VTAB_START_OBJECT,   56
+.equ VTAB_END_OBJECT,     64
+.equ VTAB_START_ARRAY,    72
+.equ VTAB_END_ARRAY,      80
 
 // MAX_JSON_DEPTH
 .equ MAX_JSON_DEPTH, 64
@@ -211,6 +212,7 @@ parse_json_zmm_dyn:
     mov     qword ptr [rbp + LOC_KEY_LEN],   rax
     mov     byte  ptr [rbp + LOC_KEY_ESC],   al    // key_escaped = false
     mov     byte  ptr [rbp + LOC_AFT_COMMA], al    // after_comma = false
+    mov     qword ptr [rbp + LOC_CHUNK_LEN], rax   // chunk_len = 0 (first iteration)
 
     // First state is ValueWhitespace; set up r10/r11 and fall into chunk_fetch.
     lea     r10, [rip + .Lvalue_whitespace]
@@ -255,8 +257,9 @@ parse_json_zmm_dyn:
     // Build load mask: (chunk_len == 64) ? ~0 : (1 << chunk_len) - 1
     cmp     rsi, 64
     je      .Lclassify_full
+    mov     ecx, esi            // ecx = chunk_len; cl used as shift count below
     mov     rax, 1
-    shl     rax, cl             // rax = 1 << chunk_len  (cl = rsi low byte)
+    shl     rax, cl             // rax = 1 << chunk_len
     dec     rax                 // rax = (1 << chunk_len) - 1
     jmp     .Lclassify_do
 .Lclassify_full:
@@ -313,7 +316,8 @@ parse_json_zmm_dyn:
 
     // Dispatch on the non-whitespace byte.
     mov     rax, qword ptr [rbp + LOC_POS]
-    movzx   eax, byte ptr [r12 + rax + rcx]   // byte = src[pos + chunk_offset]
+    add     rax, r12
+    movzx   eax, byte ptr [rax + rcx]   // byte = src[pos + chunk_offset]
     cmp     al, '{'
     je      .Lvw_open_object
     cmp     al, '['
@@ -406,7 +410,8 @@ parse_json_zmm_dyn:
 
     // Which byte is it?
     mov     rax, qword ptr [rbp + LOC_POS]
-    movzx   eax, byte ptr [r12 + rax + rcx]
+    add     rax, r12
+    movzx   eax, byte ptr [rax + rcx]
     cmp     al, '\\'
     je      .Lsc_escape
 
@@ -494,7 +499,8 @@ parse_json_zmm_dyn:
     jae     .Lrefetch_key_chars
 
     mov     rax, qword ptr [rbp + LOC_POS]
-    movzx   eax, byte ptr [r12 + rax + rcx]
+    add     rax, r12
+    movzx   eax, byte ptr [rax + rcx]
     cmp     al, '\\'
     je      .Lkc_escape
 
@@ -544,7 +550,8 @@ parse_json_zmm_dyn:
     jae     .Lrefetch_key_end
 
     mov     rax, qword ptr [rbp + LOC_POS]
-    movzx   eax, byte ptr [r12 + rax + rcx]
+    add     rax, r12
+    movzx   eax, byte ptr [rax + rcx]
     cmp     al, ':'
     jne     .Lerror
 
@@ -606,7 +613,8 @@ parse_json_zmm_dyn:
     jae     .Lrefetch_after_colon
 
     mov     rax, qword ptr [rbp + LOC_POS]
-    movzx   eax, byte ptr [r12 + rax + rcx]
+    add     rax, r12
+    movzx   eax, byte ptr [rax + rcx]
     cmp     al, '{'
     je      .Lac_open_object
     cmp     al, '['
@@ -702,7 +710,8 @@ parse_json_zmm_dyn:
 
     // Dispatch on the delimiter byte to update structural context.
     mov     rax, qword ptr [rbp + LOC_POS]
-    movzx   eax, byte ptr [r12 + rax + rcx]
+    add     rax, r12
+    movzx   eax, byte ptr [rax + rcx]
     cmp     al, '}'
     je      .Lav_close_brace
     cmp     al, ']'
@@ -739,7 +748,8 @@ parse_json_zmm_dyn:
     jae     .Lrefetch_object_start
 
     mov     rax, qword ptr [rbp + LOC_POS]
-    movzx   eax, byte ptr [r12 + rax + rcx]
+    add     rax, r12
+    movzx   eax, byte ptr [rax + rcx]
     cmp     al, '"'
     je      .Los_key
     cmp     al, '}'
@@ -805,7 +815,8 @@ parse_json_zmm_dyn:
     jae     .Lrefetch_array_start
 
     mov     rax, qword ptr [rbp + LOC_POS]
-    movzx   eax, byte ptr [r12 + rax + rcx]
+    add     rax, r12
+    movzx   eax, byte ptr [rax + rcx]
     cmp     al, ']'
     je      .Las_close_bracket
     cmp     al, '{'
@@ -912,7 +923,8 @@ parse_json_zmm_dyn:
     jae     .Lrefetch_after_value
 
     mov     rax, qword ptr [rbp + LOC_POS]
-    movzx   eax, byte ptr [r12 + rax + rcx]
+    add     rax, r12
+    movzx   eax, byte ptr [rax + rcx]
 
 .Lav_comma:
     cmp     al, ','
@@ -1043,11 +1055,10 @@ parse_json_zmm_dyn:
 //   Entry:  rsi = atom_ptr (*const u8)
 //           rdx = atom_len (usize)
 //   Exit:   al  = 1 on success, 0 on error
-//   Clobbers: rax, rdi, r8, r9  (all caller-saved)
+//   Clobbers: rax, rdi  (all caller-saved; r8/r9 NOT used — saves go to stack)
 //   Does NOT clobber: rcx, rbx, r12-r15, rbp (callee-saved are untouched)
-//   NOTE: chunk_offset (rcx) must be saved by the caller around this call
-//         only if the call sequence modifies rcx (it does not in practice,
-//         but the vtable calls inside DO clobber rcx; we save via LOC_COFF).
+//   NOTE: chunk_offset (rcx) must be saved before calling this helper;
+//         we do it unconditionally at entry via LOC_COFF.
 // ===========================================================================
 .Lemit_atom:
     // Save rcx (chunk_offset) since vtable calls will clobber it.
@@ -1100,17 +1111,20 @@ parse_json_zmm_dyn:
 
 .Lea_number:
     // Validate: call is_valid_json_number_c(ptr=rsi, len=rdx)
-    mov     r8,  rsi            // save ptr
-    mov     r9,  rdx            // save len
+    // Save ptr/len to stack slots (LOC_ATOM_START / LOC_STR_START are stale
+    // at this point); r8 and r9 are caller-saved and would be clobbered by
+    // the call, so we must not rely on them afterwards.
+    mov     qword ptr [rbp + LOC_ATOM_START], rsi   // save ptr
+    mov     qword ptr [rbp + LOC_STR_START],  rdx   // save len
     mov     rdi, rsi
     mov     rsi, rdx
     call    is_valid_json_number_c
     test    al, al
     jz      .Lea_fail
-    // Emit: call writer.number(self, ptr, len)
+    // Reload ptr/len from stack (r8/r9 clobbered by call above).
     mov     rdi, rbx
-    mov     rsi, r8
-    mov     rdx, r9
+    mov     rsi, qword ptr [rbp + LOC_ATOM_START]
+    mov     rdx, qword ptr [rbp + LOC_STR_START]
     call    qword ptr [r14 + VTAB_NUMBER]
     mov     al, 1
     mov     rcx, qword ptr [rbp + LOC_COFF]

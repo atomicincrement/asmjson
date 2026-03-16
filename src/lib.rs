@@ -9,6 +9,117 @@ pub use tape::{Tape, TapeArrayIter, TapeEntry, TapeObjectIter, TapeRef};
 use tape::TapeWriter;
 
 // ---------------------------------------------------------------------------
+// Hand-written x86-64 AVX-512BW assembly parser (direct-threading, C vtable)
+// ---------------------------------------------------------------------------
+//
+// Instead of indexing directly into Rust's implementation-defined dyn-trait
+// vtable, we supply a *stable* `#[repr(C)]` function-pointer struct.  The
+// assembly uses fixed offsets 0, 8, 16, … into this struct.
+
+/// Stable C-layout vtable passed to the assembly parser.
+///
+/// Every field is an `unsafe extern "C"` function pointer with the calling
+/// convention that the assembly uses for each `JsonWriter` method.
+#[cfg(target_arch = "x86_64")]
+#[repr(C)]
+struct ZmmVtab {
+    null: unsafe extern "C" fn(*mut ()),
+    bool_val: unsafe extern "C" fn(*mut (), bool),
+    number: unsafe extern "C" fn(*mut (), *const u8, usize),
+    string: unsafe extern "C" fn(*mut (), *const u8, usize),
+    escaped_string: unsafe extern "C" fn(*mut (), *const u8, usize),
+    key: unsafe extern "C" fn(*mut (), *const u8, usize),
+    escaped_key: unsafe extern "C" fn(*mut (), *const u8, usize),
+    start_object: unsafe extern "C" fn(*mut ()),
+    end_object: unsafe extern "C" fn(*mut ()),
+    start_array: unsafe extern "C" fn(*mut ()),
+    end_array: unsafe extern "C" fn(*mut ()),
+}
+
+/// Trampoline functions from the C calling convention into TapeWriter.
+///
+/// The `data` pointer always points to a live `TapeWriter<'a>`.  We use
+/// `'static` to satisfy the extern-"C" no-lifetime signature; safety is
+/// upheld by the caller (`parse_to_tape_zmm_dyn`) guaranteeing that the
+/// writer and source JSON both outlive the assembly call.
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_null(data: *mut ()) {
+    unsafe { (*(data as *mut TapeWriter<'static>)).null() }
+}
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_bool_val(data: *mut (), v: bool) {
+    unsafe { (*(data as *mut TapeWriter<'static>)).bool_val(v) }
+}
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_number(data: *mut (), ptr: *const u8, len: usize) {
+    unsafe {
+        let s: &'static str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len));
+        (*(data as *mut TapeWriter<'static>)).number(s)
+    }
+}
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_string(data: *mut (), ptr: *const u8, len: usize) {
+    unsafe {
+        let s: &'static str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len));
+        (*(data as *mut TapeWriter<'static>)).string(s)
+    }
+}
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_escaped_string(data: *mut (), ptr: *const u8, len: usize) {
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len));
+        (*(data as *mut TapeWriter<'static>)).escaped_string(Box::from(s))
+    }
+}
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_key(data: *mut (), ptr: *const u8, len: usize) {
+    unsafe {
+        let s: &'static str = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len));
+        (*(data as *mut TapeWriter<'static>)).key(s)
+    }
+}
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_escaped_key(data: *mut (), ptr: *const u8, len: usize) {
+    unsafe {
+        let s = std::str::from_utf8_unchecked(std::slice::from_raw_parts(ptr, len));
+        (*(data as *mut TapeWriter<'static>)).escaped_key(Box::from(s))
+    }
+}
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_start_object(data: *mut ()) {
+    unsafe { (*(data as *mut TapeWriter<'static>)).start_object() }
+}
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_end_object(data: *mut ()) {
+    unsafe { (*(data as *mut TapeWriter<'static>)).end_object() }
+}
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_start_array(data: *mut ()) {
+    unsafe { (*(data as *mut TapeWriter<'static>)).start_array() }
+}
+#[cfg(target_arch = "x86_64")]
+unsafe extern "C" fn tw_end_array(data: *mut ()) {
+    unsafe { (*(data as *mut TapeWriter<'static>)).end_array() }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[allow(improper_ctypes)]
+unsafe extern "C" {
+    /// Entry point assembled from `asm/x86_64/parse_json_zmm_dyn.S`.
+    ///
+    /// Calls writer methods through the supplied `ZmmVtab`.  Does NOT call
+    /// `finish`.  Returns `true` on success.
+    fn parse_json_zmm_dyn(
+        src_ptr: *const u8,
+        src_len: usize,
+        writer_data: *mut (),
+        writer_vtab: *const ZmmVtab,
+        frames_buf: *mut u8,
+        unescape_buf: *mut String,
+    ) -> bool;
+}
+
+// ---------------------------------------------------------------------------
 // Optional state-entry statistics (compiled in with --features stats).
 // ---------------------------------------------------------------------------
 
@@ -287,6 +398,68 @@ fn write_atom<'a, W: JsonWriter<'a>>(s: &'a str, w: &mut W) -> bool {
 /// ```
 pub fn parse_to_tape<'a>(src: &'a str, classify: ClassifyFn) -> Option<Tape<'a>> {
     parse_with(src, classify, TapeWriter::new())
+}
+
+/// Parse `src` to a [`Tape`] using the hand-written x86-64 AVX-512BW
+/// assembly parser with direct-threaded state dispatch.
+///
+/// Unlike [`parse_to_tape`] this function has the ZMM classifier baked in
+/// and requires no `classify` argument.  Only available on `x86_64` targets.
+///
+/// Returns `None` if the JSON is invalid or nesting exceeds
+/// [`MAX_JSON_DEPTH`] levels.
+///
+/// ```rust
+/// #[cfg(target_arch = "x86_64")]
+/// {
+///     use asmjson::parse_to_tape_zmm_dyn;
+///     let tape = parse_to_tape_zmm_dyn(r#"{"x":1}"#).unwrap();
+///     use asmjson::JsonRef;
+///     assert_eq!(tape.root().get("x").as_i64(), Some(1));
+/// }
+/// ```
+#[cfg(target_arch = "x86_64")]
+pub fn parse_to_tape_zmm_dyn<'a>(src: &'a str) -> Option<Tape<'a>> {
+    let mut writer = TapeWriter::new();
+    let mut frames_buf = [FrameKind::Object; MAX_JSON_DEPTH];
+    let mut unescape_buf = String::new();
+
+    // Build the stable C-layout vtable on the stack.  The assembly indexes
+    // into this with fixed byte offsets (0, 8, 16, …) — no unstable Rust
+    // dyn-vtable layout needed.
+    let vtab = ZmmVtab {
+        null: tw_null,
+        bool_val: tw_bool_val,
+        number: tw_number,
+        string: tw_string,
+        escaped_string: tw_escaped_string,
+        key: tw_key,
+        escaped_key: tw_escaped_key,
+        start_object: tw_start_object,
+        end_object: tw_end_object,
+        start_array: tw_start_array,
+        end_array: tw_end_array,
+    };
+
+    // SAFETY:
+    //   • `writer` is alive for the entire assembly call and is the only
+    //     mutable reference to its entries.
+    //   • `src` lives for at least `'a`, so the slices stored into the tape
+    //     by the trampolines remain valid after the call.
+    //   • `parse_json_zmm_dyn` only calls &mut self methods; it does NOT call
+    //     `finish`.
+    let ok = unsafe {
+        parse_json_zmm_dyn(
+            src.as_ptr(),
+            src.len(),
+            &raw mut writer as *mut (),
+            &vtab,
+            frames_buf.as_mut_ptr() as *mut u8,
+            &raw mut unescape_buf,
+        )
+    };
+
+    if ok { writer.finish() } else { None }
 }
 
 /// Parse `src` using a custom [`JsonWriter`], returning its output.
