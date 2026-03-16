@@ -1,4 +1,4 @@
-use crate::tape::{TapeEntry, TapeRef, tape_skip};
+use crate::tape::{TapeEntryKind, TapeRef, tape_skip};
 
 // ---------------------------------------------------------------------------
 // JsonRef trait
@@ -110,53 +110,34 @@ impl<'t, 'src: 't> JsonRef<'t> for TapeRef<'t, 'src> {
     type Item = Self;
 
     fn is_array(self) -> bool {
-        matches!(&self.tape[self.pos], TapeEntry::StartArray(_))
+        self.tape[self.pos].kind() == TapeEntryKind::StartArray
     }
 
     fn is_object(self) -> bool {
-        matches!(&self.tape[self.pos], TapeEntry::StartObject(_))
+        self.tape[self.pos].kind() == TapeEntryKind::StartObject
     }
 
     fn as_null(self) -> Option<()> {
-        matches!(&self.tape[self.pos], TapeEntry::Null).then_some(())
+        (self.tape[self.pos].kind() == TapeEntryKind::Null).then_some(())
     }
 
     fn as_bool(self) -> Option<bool> {
-        if let TapeEntry::Bool(b) = &self.tape[self.pos] {
-            Some(*b)
-        } else {
-            None
-        }
+        self.tape[self.pos].as_bool()
     }
 
     fn as_number_str(self) -> Option<&'t str> {
-        if let TapeEntry::Number(s) = &self.tape[self.pos] {
-            Some(s)
-        } else {
-            None
-        }
+        self.tape[self.pos].as_number()
     }
 
     fn as_str(self) -> Option<&'t str> {
-        match &self.tape[self.pos] {
-            TapeEntry::String(s) => Some(s),
-            TapeEntry::EscapedString(s) => Some(s.as_ref()),
-            _ => None,
-        }
+        self.tape[self.pos].as_string()
     }
 
     fn get(self, key: &str) -> Option<Self> {
-        let end_idx = match &self.tape[self.pos] {
-            TapeEntry::StartObject(e) => *e,
-            _ => return None,
-        };
+        let end_idx = self.tape[self.pos].as_start_object()?;
         let mut i = self.pos + 1;
         while i < end_idx {
-            let k_str: &str = match &self.tape[i] {
-                TapeEntry::Key(k) => k,
-                TapeEntry::EscapedKey(k) => k.as_ref(),
-                _ => break,
-            };
+            let k_str: &str = self.tape[i].as_key()?;
             let val_pos = i + 1;
             if k_str == key {
                 return Some(TapeRef {
@@ -170,10 +151,7 @@ impl<'t, 'src: 't> JsonRef<'t> for TapeRef<'t, 'src> {
     }
 
     fn index_at(self, idx: usize) -> Option<Self> {
-        let end_idx = match &self.tape[self.pos] {
-            TapeEntry::StartArray(e) => *e,
-            _ => return None,
-        };
+        let end_idx = self.tape[self.pos].as_start_array()?;
         let mut i = self.pos + 1;
         let mut count = 0usize;
         while i < end_idx {
@@ -190,30 +168,26 @@ impl<'t, 'src: 't> JsonRef<'t> for TapeRef<'t, 'src> {
     }
 
     fn len(self) -> Option<usize> {
-        match &self.tape[self.pos] {
-            TapeEntry::StartArray(end_idx) => {
-                let end_idx = *end_idx;
-                let mut count = 0usize;
-                let mut i = self.pos + 1;
-                while i < end_idx {
-                    i = tape_skip(self.tape, i);
-                    count += 1;
-                }
-                Some(count)
+        if let Some(end_idx) = self.tape[self.pos].as_start_array() {
+            let mut count = 0usize;
+            let mut i = self.pos + 1;
+            while i < end_idx {
+                i = tape_skip(self.tape, i);
+                count += 1;
             }
-            TapeEntry::StartObject(end_idx) => {
-                let end_idx = *end_idx;
-                let mut count = 0usize;
-                let mut i = self.pos + 1;
-                while i < end_idx {
-                    // entries[i] is Key, entries[i+1] is value
-                    i = tape_skip(self.tape, i + 1);
-                    count += 1;
-                }
-                Some(count)
-            }
-            _ => None,
+            return Some(count);
         }
+        if let Some(end_idx) = self.tape[self.pos].as_start_object() {
+            let mut count = 0usize;
+            let mut i = self.pos + 1;
+            while i < end_idx {
+                // entries[i] is Key, entries[i+1] is value
+                i = tape_skip(self.tape, i + 1);
+                count += 1;
+            }
+            return Some(count);
+        }
+        None
     }
 }
 

@@ -6,7 +6,7 @@ use asmjson::parse_to_tape as parse_json;
 use asmjson::parse_to_tape_zmm_dyn;
 #[cfg(feature = "stats")]
 use asmjson::stats;
-use asmjson::{TapeEntry, classify_u64, classify_zmm, parse_to_tape};
+use asmjson::{TapeEntry, TapeEntryKind, classify_u64, classify_zmm, parse_to_tape};
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
 // ---------------------------------------------------------------------------
@@ -18,9 +18,8 @@ use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 fn tape_sum_lens(tape: &asmjson::Tape<'_>) -> usize {
     tape.entries
         .iter()
-        .map(|e| match e {
-            TapeEntry::String(s) => s.len(),
-            TapeEntry::Key(k) => k.len(),
+        .map(|e| match e.kind() {
+            TapeEntryKind::String | TapeEntryKind::Key => e.as_string().map_or(0, |s| s.len()),
             _ => 0,
         })
         .sum()
