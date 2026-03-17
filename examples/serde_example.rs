@@ -103,12 +103,18 @@ fn run(label: &str, data: &str) {
     assert!(!records[1].active);
     assert_eq!(records[1].score, Some(0.0)); // i/2 = 0
 
+    let bytes = data.len() as f64;
+    let gib = (1u64 << 30) as f64;
+    let parse_gibs = bytes / (parse_elapsed.as_secs_f64() * gib);
+    let serde_gibs = bytes / (serde_elapsed.as_secs_f64() * gib);
     println!(
-        "{label}: decoded {} records, last id={}\n  parse_to_dom: {:.3} ms  |  from_taperef: {:.3} ms",
+        "{label}: decoded {} records, last id={}\n  parse_to_dom: {:.3} ms  ({:.2} GiB/s)  |  from_taperef: {:.3} ms  ({:.2} GiB/s)",
         records.len(),
         records.last().unwrap().id,
         parse_elapsed.as_secs_f64() * 1000.0,
+        parse_gibs,
         serde_elapsed.as_secs_f64() * 1000.0,
+        serde_gibs,
     );
 }
 
