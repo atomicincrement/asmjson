@@ -197,6 +197,12 @@ LF, `0x0D` CR, `0x20` SP).  Well-formed JSON is parsed identically; input
 that embeds bare control characters other than the four legal ones will be
 accepted where a strict parser would reject it.
 
+Additionally, asmjson does **not** scan string contents for unescaped control
+characters (U+0000–U+001F), which the JSON specification forbids inside string
+values.  If your use-case requires this check it can be performed as an extra
+pass over the raw string bytes after parsing — for example, rejecting any
+string whose raw byte span contains a byte `< 0x20`.
+
 ## License
 
 MIT — see [LICENSE](https://github.com/andy-thomason/asmjson/blob/master/LICENSE).
