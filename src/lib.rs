@@ -407,6 +407,7 @@ fn is_valid_json_number(s: &[u8]) -> bool {
 
 /// C-linkage entry point for the hand-written assembly parser.
 /// Returns 1 if `bytes[..len]` is a valid JSON number, 0 otherwise.
+#[doc(hidden)]
 #[unsafe(no_mangle)]
 pub extern "C" fn is_valid_json_number_c(ptr: *const u8, len: usize) -> bool {
     let s = unsafe { std::slice::from_raw_parts(ptr, len) };
@@ -421,6 +422,7 @@ pub extern "C" fn is_valid_json_number_c(ptr: *const u8, len: usize) -> bool {
 /// pointer and length to `*out_ptr` / `*out_len`, then **leaks** the box.
 /// Ownership is transferred to the `DomEntry` written immediately after this
 /// call, which will free it on `Drop`.
+#[doc(hidden)]
 #[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 #[inline(never)]
@@ -1075,6 +1077,7 @@ fn parse_json_impl<'a, W: Sax<'a>>(
 ///
 /// Supported escapes: `\"` `\\` `\/` `\b` `\f` `\n` `\r` `\t` `\uXXXX`
 /// (including surrogate pairs).  Unknown escapes are passed through verbatim.
+#[doc(hidden)]
 #[unsafe(no_mangle)]
 #[inline(never)]
 pub fn unescape_str(s: &str, out: &mut String) {
