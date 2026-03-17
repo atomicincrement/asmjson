@@ -8,6 +8,29 @@ Always run `cargo fmt` before committing any Rust source changes:
 cargo fmt
 ```
 
+Make sure that there is exactly one blank line between functions.
+Don't mix inline with non-inline braces.
+
+Bad:
+
+```
+    fn end_object(&mut self) {}
+    fn start_array(&mut self) {
+        self.arrays += 1;
+    }
+```
+
+Good:
+
+```
+    fn end_object(&mut self) {
+    }
+
+    fn start_array(&mut self) {
+        self.arrays += 1;
+    }
+```
+
 ## Conversation log
 
 Keep `doc/conversation.md` up to date as work progresses.  After each

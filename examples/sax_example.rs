@@ -85,9 +85,11 @@ impl<'src> Sax<'src> for Counter {
 
     // end_object / end_array are only needed when tracking nesting.
     fn end_object(&mut self) {}
+
     fn start_array(&mut self) {
         self.arrays += 1;
     }
+
     fn end_array(&mut self) {}
 
     fn finish(self) -> Option<Self::Output> {

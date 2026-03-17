@@ -30,7 +30,9 @@ impl LenSumWriter {
 impl<'src> Sax<'src> for LenSumWriter {
     type Output = usize;
     fn null(&mut self) {}
+
     fn bool_val(&mut self, _v: bool) {}
+
     fn number(&mut self, _s: &'src str) {}
     fn string(&mut self, s: &'src str) {
         self.total += s.len();
@@ -45,8 +47,11 @@ impl<'src> Sax<'src> for LenSumWriter {
         self.total += s.len();
     }
     fn start_object(&mut self) {}
+
     fn end_object(&mut self) {}
+
     fn start_array(&mut self) {}
+
     fn end_array(&mut self) {}
     fn finish(self) -> Option<usize> {
         Some(self.total)
