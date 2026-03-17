@@ -5,23 +5,12 @@
 //!
 //! The example [`Counter`] writer counts every scalar kind in the input.
 //!
-//! Two entry points are shown:
-//!
-//! | Function | Description |
-//! |----------|-------------|
-//! | [`parse_with`] | Portable SWAR classifier — runs on any architecture. |
-//! | [`parse_with_zmm`] | Hand-written AVX-512BW x86-64 assembly — `unsafe`, x86_64 only. |
-//!
-//! Run the portable version:
+//! At runtime the example checks CPUID.  If the CPU supports AVX-512BW the
+//! fast hand-written assembly path ([`parse_with_zmm`]) is used;
+//! otherwise it falls back to the portable SWAR path ([`parse_with`]).
 //!
 //! ```sh
 //! cargo run --example sax_example
-//! ```
-//!
-//! Run the AVX-512BW assembly version (requires a Skylake-X or later CPU):
-//!
-//! ```sh
-//! cargo run --example sax_example -- zmm
 //! ```
 
 #[cfg(target_arch = "x86_64")]
@@ -107,36 +96,21 @@ const SRC: &str = r#"[
     {"id":3,"name":"Carol","active":true,"score":7.0,"tags":[]}
 ]"#;
 
-fn run_portable(src: &str) {
-    println!("=== parse_with  (portable SWAR) ===");
-    let counts = parse_with(src, Counter::default()).expect("parse failed");
-    println!("{counts:#?}");
-    println!();
-}
-
-#[cfg(target_arch = "x86_64")]
-fn run_zmm(src: &str) {
-    println!("=== parse_with_zmm  (AVX-512BW assembly) ===");
-    // SAFETY: caller must ensure the CPU supports AVX-512BW.
-    let counts = unsafe { parse_with_zmm(src, Counter::default()) }.expect("parse failed");
+fn report(label: &str, counts: Counter) {
+    println!("=== {label} ===");
     println!("{counts:#?}");
     println!();
 }
 
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let use_zmm = args.get(1).map(|s| s == "zmm").unwrap_or(false);
-
-    if use_zmm {
-        #[cfg(target_arch = "x86_64")]
-        run_zmm(SRC);
-
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            eprintln!("parse_with_zmm is only available on x86_64");
-            std::process::exit(1);
-        }
-    } else {
-        run_portable(SRC);
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx512bw") {
+        // SAFETY: CPUID confirmed AVX-512BW is available.
+        let counts = unsafe { parse_with_zmm(SRC, Counter::default()) }.expect("parse failed");
+        report("parse_with_zmm  (AVX-512BW assembly)", counts);
+        return;
     }
+
+    let counts = parse_with(SRC, Counter::default()).expect("parse failed");
+    report("parse_with  (portable SWAR)", counts);
 }
