@@ -82,16 +82,19 @@ impl<'src> Sax<'src> for StringCounter {
 
 const CHUNK_SIZE: usize = 1 << 20; // 1 MiB
 
-/// Parse one line of JSON, accumulating into `out`.
-fn parse_line_into(line: &str, out: &mut StringCounter) {
-    #[cfg(target_arch = "x86_64")]
-    if is_x86_feature_detected!("avx512bw") {
-        if let Some(c) = unsafe { parse_with_zmm(line, StringCounter::default()) } {
-            out.strings += c.strings;
-            out.keys += c.keys;
-        }
-        return;
+/// Parse one line using the AVX-512BW assembly path.
+/// The caller must have already verified `avx512bw` support via CPUID.
+#[cfg(target_arch = "x86_64")]
+fn parse_line_into_zmm(line: &str, out: &mut StringCounter) {
+    // SAFETY: caller confirmed AVX-512BW is available.
+    if let Some(c) = unsafe { parse_with_zmm(line, StringCounter::default()) } {
+        out.strings += c.strings;
+        out.keys += c.keys;
     }
+}
+
+/// Parse one line using the portable SWAR path.
+fn parse_line_into_rust(line: &str, out: &mut StringCounter) {
     if let Some(c) = parse_with(line, StringCounter::default()) {
         out.strings += c.strings;
         out.keys += c.keys;
@@ -99,12 +102,24 @@ fn parse_line_into(line: &str, out: &mut StringCounter) {
 }
 
 /// Parse every non-empty line in a chunk, returning total counts.
+/// The parser variant is chosen once at the top of the function — avoiding a
+/// redundant CPUID check on every line — by using two separate loops.
 fn parse_chunk(chunk: &str) -> StringCounter {
     let mut out = StringCounter::default();
+    #[cfg(target_arch = "x86_64")]
+    if is_x86_feature_detected!("avx512bw") {
+        for line in chunk.lines() {
+            let line = line.trim();
+            if !line.is_empty() {
+                parse_line_into_zmm(line, &mut out);
+            }
+        }
+        return out;
+    }
     for line in chunk.lines() {
         let line = line.trim();
         if !line.is_empty() {
-            parse_line_into(line, &mut out);
+            parse_line_into_rust(line, &mut out);
         }
     }
     out
@@ -197,6 +212,7 @@ fn main() {
         CHUNK_SIZE / 1024,
     );
 
+    let bytes = mmap.len();
     let t = Instant::now();
     let totals: StringCounter = chunks
         .par_iter()
@@ -209,7 +225,9 @@ fn main() {
             a.keys += b.keys;
             a
         });
-    println!("  done in {:.2?}", t.elapsed());
+    let elapsed = t.elapsed();
+    let gib_per_sec = bytes as f64 / elapsed.as_secs_f64() / (1u64 << 30) as f64;
+    println!("  done in {:.2?}  ({:.2} GiB/s)", elapsed, gib_per_sec);
 
     println!("keys   found : {}", totals.keys);
     println!("strings found: {}", totals.strings);
