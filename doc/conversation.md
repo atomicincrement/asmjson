@@ -2222,3 +2222,57 @@ On this machine:
 ### Commit
 
 `0f70426` examples: mmap_parallel generates its own 1 GiB test file
+
+## Session — Push unescape responsibility to Sax implementors
+
+### What was done
+
+Changed the contract of `Sax::escaped_string` and `Sax::escaped_key`: they
+now receive the **raw** (still-escaped) `&str` slice directly from the
+source JSON rather than a pre-decoded string.  Callers that need the decoded
+text call `unescape_str` themselves.
+
+Changes across the codebase:
+
+- `src/sax.rs`: docstrings updated to document the raw-string contract.
+- `src/lib.rs`:
+  - `parse_json_impl` — removed `unescape_buf: &mut String` parameter;
+    passes `raw` / `current_key_raw` directly to `writer.escaped_string` /
+    `writer.escaped_key`.
+  - `parse_with` — no longer creates or passes an `unescape_buf`.
+  - `parse_with_zmm` — no longer creates or passes an `unescape_buf`;
+    `parse_json_zmm_sax` extern signature loses its last parameter.
+- `src/dom/mod.rs`: `DomWriter::escaped_string` and `escaped_key` now
+  allocate a local `String`, call `crate::unescape_str`, and convert to
+  `Box<str>` internally.  They are the only implementations that need
+  decoded text.
+- `asm/x86_64/parse_json_zmm_sax.S`:
+  - Function signature comment: removed `unescape_buf / r9` argument.
+  - Prologue: removed `mov [rbp+LOC_UNESCAPE], r9` save.
+  - `.Lsc_emit_escaped`: removed `call unescape_str` and String field
+    reads; now calls `VTAB_ESCAPED_STRING(rbx, rsi, rdx)` directly with
+    the raw ptr/len that were already in rsi/rdx.
+  - `.Lke_emit_escaped`: same — calls `VTAB_ESCAPED_KEY` directly with
+    `LOC_KEY_PTR` / `LOC_KEY_LEN`.
+  - Removed `LOC_UNESCAPE` .equ constant and its stack-layout comment.
+- `asm/x86_64/parse_json_zmm_dom.S`: **unchanged** — the DOM assembly
+  still calls `unescape_str` + `dom_take_box_str` internally and never
+  goes through the `Sax` trait for escaped entries.
+
+### Design decisions
+
+The previous design coupled the escape-decoding step to the parser
+internals: `parse_json_impl` always allocated/cleared a `String` and ran
+`unescape_str` before calling the trait method, even for implementations
+that only count strings and discard the content.  Moving the call into
+`DomWriter` (the only implementation that needs decoded text from the SWAR
+path) eliminates that allocation for all other `Sax` implementations and
+simplifies the assembly SAX path by ~12 instructions per escape event.
+
+### Results
+
+All 29 unit tests pass.
+
+### Commit
+
+`9c2d164` refactor: escaped_string/escaped_key receive raw source &str; DomWriter unescapes internally
