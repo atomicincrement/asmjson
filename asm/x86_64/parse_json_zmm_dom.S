@@ -18,9 +18,8 @@
 //       size_t        *tape_len_out,  // rcx  — receives token count on success
 //       uint8_t       *frames_buf,    // r8   — [FrameKind; 64], u8 per entry
 //       uint64_t      *open_buf,      // r9   — [usize; 64] backfill index stack
-//       void          *unescape_buf,  // [rsp+8]  — *mut String for escape decoding
-//       bool          *has_escapes_out, // [rsp+16] — written to 1 if any EscapedString/EscapedKey
-//       size_t         tape_cap       // [rsp+24] — capacity of tape_ptr array in entries
+//       bool          *has_escapes_out, // [rsp+8]  — written to 1 if any EscapedString/EscapedKey
+//       size_t         tape_cap       // [rsp+16] — capacity of tape_ptr array in entries
 //   );
 //   Returns (u8): RESULT_OK(0) on success,
 //                RESULT_PARSE_ERROR(1) on parse failure,
@@ -46,19 +45,15 @@
 // Caller-provided symbols (from Rust lib with C linkage)
 // ---------------------------------------------------------------------------
 //
-//   void unescape_str(s_ptr, s_len, out_string_ptr)
-//     Fills *out_string_ptr (a *mut String) with the decoded text.
-//     Declared:  #[unsafe(no_mangle)] #[inline(never)]
-//                → (rdi=s_ptr, rsi=s_len, rdx=out_string_ptr)
-//
 //   bool is_valid_json_number_c(ptr, len)
 //     Returns 1 if bytes[..len] form a valid JSON number, else 0.
 //     → (rdi=ptr, rsi=len)
 //
-//   void dom_take_box_str(unescape_buf, out_ptr, out_len)
-//     Moves the decoded string out of *unescape_buf into a Box<str>,
-//     writing its data pointer and length to *out_ptr / *out_len.
-//     → (rdi=unescape_buf, rsi=out_ptr, rdx=out_len)
+//   void dom_unescape_to_box_str(raw_ptr, raw_len, out_ptr, out_len)
+//     Decodes the still-escaped bytes at raw_ptr[..raw_len], boxes the result,
+//     and writes the Box<str> data pointer and byte length to *out_ptr / *out_len.
+//     Declared:  #[unsafe(no_mangle)] #[inline(never)]
+//                → (rdi=raw_ptr, rsi=raw_len, rdx=out_ptr, rcx=out_len)
 //
 // ---------------------------------------------------------------------------
 // Register assignments (persistent across the entire function)
@@ -92,9 +87,8 @@
 // After five pushes  rsp = rbp - 40.  sub rsp, 152  →  rsp = rbp - 192.
 // 192 % 16 == 0  ✓  (required for ABI-aligned calls)
 //
-//   [rbp +32]  tape_cap                 (9th arg, caller's stack slot)
-//   [rbp +24]  has_escapes_out ptr      (8th arg, caller's stack slot)
-//   [rbp +16]  unescape_buf ptr         (7th arg, caller's stack slot)
+//   [rbp +24]  tape_cap                 (8th arg, caller's stack slot)
+//   [rbp +16]  has_escapes_out ptr      (7th arg, caller's stack slot)
 //   [rbp + 8]  return address
 //   [rbp + 0]  saved rbp
 //   [rbp - 8]  saved rbx
@@ -102,7 +96,7 @@
 //   [rbp -24]  saved r13
 //   [rbp -32]  saved r14
 //   [rbp -40]  saved r15
-//   [rbp - 48]  unescape_buf ptr         (copy of [rbp+16] for convenience)
+//   [rbp - 48]  (unused padding)
 //   [rbp - 56]  frames_depth             (usize; 0..64)
 //   [rbp - 64]  pos                      (usize; bytes consumed so far)
 //   [rbp - 72]  str_start                (usize; byte offset after opening '"')
@@ -125,7 +119,6 @@
 .intel_syntax noprefix
 
 // Stack-frame byte offsets from rbp
-.equ LOC_UNESCAPE,    -48
 .equ LOC_FDEPTH,      -56
 .equ LOC_POS,         -64
 .equ LOC_STR_START,   -72
@@ -144,8 +137,8 @@
 .equ LOC_TLEN_OUT,    -176     // tape_len_out pointer
 .equ LOC_OPEN_BUF,    -184     // open_buf pointer
 .equ LOC_OPEN_DEPTH,  -192     // current open-stack depth
-.equ LOC_HAS_ESC_OUT, +24      // has_escapes_out pointer (8th arg, caller's stack)
-.equ LOC_TAPE_CAP,    +32      // tape capacity in entries (9th arg, caller's stack)
+.equ LOC_HAS_ESC_OUT, +16      // has_escapes_out pointer (7th arg, caller's stack)
+.equ LOC_TAPE_CAP,    +24      // tape capacity in entries (8th arg, caller's stack)
 
 // Result codes (returned in al)
 .equ RESULT_OK,             0
@@ -218,9 +211,6 @@ parse_json_zmm_dom:
     mov     qword ptr [rbp + LOC_TLEN_OUT], rcx         // tape_len_out
     mov     r15, r8                                     // frames_buf
     mov     qword ptr [rbp + LOC_OPEN_BUF],  r9         // open_buf
-    // unescape_buf is the 7th argument, passed on the caller's stack at [rbp+16].
-    mov     rax, qword ptr [rbp + 16]
-    mov     qword ptr [rbp + LOC_UNESCAPE], rax
 
     // Initialise local variables.
     xor     eax, eax
@@ -470,16 +460,13 @@ parse_json_zmm_dom:
     // Spill r8/r9 (chunk_len/pos) — external calls clobber caller-saved registers.
     mov     qword ptr [rbp + LOC_CHUNK_LEN], r8
     mov     qword ptr [rbp + LOC_POS],       r9
+    // call dom_unescape_to_box_str(raw_ptr, raw_len, &tmp_ptr, &tmp_len)
+    // Reuse LOC_ATOM_START as tmp_ptr slot, LOC_STR_START as tmp_len slot.
     mov     rdi, rsi                               // arg1: raw_ptr
     mov     rsi, rdx                               // arg2: raw_len
-    mov     rdx, qword ptr [rbp + LOC_UNESCAPE]   // arg3: *mut String
-    call    unescape_str
-    // call dom_take_box_str(unescape_buf, &tmp_ptr, &tmp_len)
-    // Reuse LOC_ATOM_START as tmp_ptr slot, LOC_STR_START as tmp_len slot.
-    mov     rdi, qword ptr [rbp + LOC_UNESCAPE]
-    lea     rsi, [rbp + LOC_ATOM_START]
-    lea     rdx, [rbp + LOC_STR_START]
-    call    dom_take_box_str
+    lea     rdx, [rbp + LOC_ATOM_START]            // arg3: &tmp_ptr
+    lea     rcx, [rbp + LOC_STR_START]             // arg4: &tmp_len
+    call    dom_unescape_to_box_str
     // Restore r8/r9 after external calls.
     mov     r8, qword ptr [rbp + LOC_CHUNK_LEN]
     mov     r9, qword ptr [rbp + LOC_POS]
@@ -627,14 +614,13 @@ parse_json_zmm_dom:
     // Spill r8/r9 (chunk_len/pos) — external calls clobber caller-saved registers.
     mov     qword ptr [rbp + LOC_CHUNK_LEN], r8
     mov     qword ptr [rbp + LOC_POS],       r9
-    mov     rdi, qword ptr [rbp + LOC_KEY_PTR]    // raw_ptr
-    mov     rsi, qword ptr [rbp + LOC_KEY_LEN]    // raw_len
-    mov     rdx, qword ptr [rbp + LOC_UNESCAPE]   // *mut String
-    call    unescape_str
-    mov     rdi, qword ptr [rbp + LOC_UNESCAPE]
-    lea     rsi, [rbp + LOC_ATOM_START]
-    lea     rdx, [rbp + LOC_STR_START]
-    call    dom_take_box_str
+    // call dom_unescape_to_box_str(raw_ptr, raw_len, &tmp_ptr, &tmp_len)
+    // Reuse LOC_ATOM_START as tmp_ptr slot, LOC_STR_START as tmp_len slot.
+    mov     rdi, qword ptr [rbp + LOC_KEY_PTR]    // arg1: raw_ptr
+    mov     rsi, qword ptr [rbp + LOC_KEY_LEN]    // arg2: raw_len
+    lea     rdx, [rbp + LOC_ATOM_START]            // arg3: &tmp_ptr
+    lea     rcx, [rbp + LOC_STR_START]             // arg4: &tmp_len
+    call    dom_unescape_to_box_str
     // Restore r8/r9 after external calls.
     mov     r8, qword ptr [rbp + LOC_CHUNK_LEN]
     mov     r9, qword ptr [rbp + LOC_POS]

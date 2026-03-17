@@ -217,7 +217,6 @@ unsafe extern "C" {
         tape_len_out: *mut usize,
         frames_buf: *mut u8,
         open_buf: *mut u64,
-        unescape_buf: *mut String,
         has_escapes_out: *mut bool,
         tape_cap: usize,
     ) -> u8;
@@ -414,29 +413,31 @@ pub extern "C" fn is_valid_json_number_c(ptr: *const u8, len: usize) -> bool {
     is_valid_json_number(s)
 }
 
-/// Called from `parse_json_zmm_dom` to transfer the decoded escape buffer
-/// to a heap-allocated `Box<str>`.
+/// Called from `parse_json_zmm_dom` to unescape and box a raw JSON string
+/// in one step.
 ///
-/// After `unescape_str` fills `*unescape_buf` with the decoded text, this
-/// function moves that `String` into a `Box<str>` (reallocating to trim
-/// excess capacity), writes the data pointer and length to `*out_ptr` /
-/// `*out_len`, then **leaks** the box.  Ownership is transferred to the
-/// `DomEntry` written immediately after this call, which will free it on
-/// `Drop`.
+/// Decodes the still-escaped bytes at `raw_ptr[..raw_len]` via
+/// [`unescape_str`], moves the result into a `Box<str>`, writes the data
+/// pointer and length to `*out_ptr` / `*out_len`, then **leaks** the box.
+/// Ownership is transferred to the `DomEntry` written immediately after this
+/// call, which will free it on `Drop`.
 #[cfg(target_arch = "x86_64")]
 #[unsafe(no_mangle)]
 #[inline(never)]
-pub extern "C" fn dom_take_box_str(
-    unescape_buf: *mut String,
+pub extern "C" fn dom_unescape_to_box_str(
+    raw_ptr: *const u8,
+    raw_len: usize,
     out_ptr: *mut *const u8,
     out_len: *mut usize,
 ) {
     unsafe {
-        let s = std::mem::replace(&mut *unescape_buf, String::new());
-        let boxed: Box<str> = s.into_boxed_str();
+        let raw = std::str::from_utf8_unchecked(std::slice::from_raw_parts(raw_ptr, raw_len));
+        let mut buf = String::new();
+        unescape_str(raw, &mut buf);
+        let boxed: Box<str> = buf.into_boxed_str();
         let len = boxed.len();
-        let raw: *mut str = Box::into_raw(boxed);
-        *out_ptr = raw as *mut u8 as *const u8;
+        let raw_out: *mut str = Box::into_raw(boxed);
+        *out_ptr = raw_out as *mut u8 as *const u8;
         *out_len = len;
     }
 }
@@ -530,7 +531,6 @@ pub unsafe fn parse_to_dom_zmm<'a>(
 
     let mut frames_buf = [FrameKind::Object; MAX_JSON_DEPTH];
     let mut open_buf = [0u64; MAX_JSON_DEPTH];
-    let mut unescape_buf = String::new();
 
     // Start at the caller-supplied hint, or default to src.len()/4 entries.
     // For well-formed JSON this default comfortably exceeds the tape length
@@ -543,7 +543,6 @@ pub unsafe fn parse_to_dom_zmm<'a>(
         let tape_ptr = tape_data.as_mut_ptr() as *mut DomEntry<'static>;
         let mut tape_len: usize = 0;
         let mut has_escapes: bool = false;
-        unescape_buf.clear();
 
         // SAFETY:
         //   • `tape_data` has exactly `capacity` entries; the assembly checks
@@ -552,7 +551,7 @@ pub unsafe fn parse_to_dom_zmm<'a>(
         //   • `src` lives for at least `'a`; string pointers stored in tape
         //     entries point into `src`'s bytes and remain valid for `'a`.
         //   • EscapedString / EscapedKey entries own a `Box<str>` allocated by
-        //     `dom_take_box_str`; `DomEntry::drop` frees them.
+        //     `dom_unescape_to_box_str`; `DomEntry::drop` frees them.
         //   • `parse_json_zmm_dom` does NOT call `finish`.
         let result = unsafe {
             parse_json_zmm_dom(
@@ -562,7 +561,6 @@ pub unsafe fn parse_to_dom_zmm<'a>(
                 &raw mut tape_len,
                 frames_buf.as_mut_ptr() as *mut u8,
                 open_buf.as_mut_ptr(),
-                &raw mut unescape_buf,
                 &raw mut has_escapes,
                 capacity,
             )
