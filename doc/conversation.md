@@ -2508,3 +2508,33 @@ Both invocations were updated to `parse_to_dom(src, None)`.
 and CI is expected to pass on `ubuntu-latest` (no AVX-512, zmm tests skip).
 
 **Commit** — e4e68f4 fix: gate zmm tests on avx512bw; fix doctest arity; bump to 0.2.3
+
+## Session — First draft JOSS paper
+
+### Write paper.md and paper.bib for Journal of Open Source Software
+
+**What was done** — Created a first-draft JOSS submission in
+`doc/paper/paper.md` (Pandoc Markdown, JOSS format) and `doc/paper/paper.bib`
+(BibLaTeX references), following the JOSS paper guidelines fetched from
+joss.readthedocs.io.  The paper (~1200 body words) covers:
+
+- **Summary** — high-level description for a non-specialist audience.
+- **Statement of need** — JSON parsing as a data-pipeline bottleneck; gap
+  between library performance and hardware capability.
+- **State of the field** — comparison with simdjson/Langdale & Lemire,
+  simd-json, sonic-rs, serde_json; explains how asmjson differs
+  (AVX-512BW, direct threading, DOM-in-assembly).
+- **Software design** — two assembly listings (vcmp classify chunk, tzcnt
+  whitespace skip), tape DOM design, SWAR fallback, API surface.
+- **Research impact statement** — crates.io release; future directions
+  (CSV/TSV, compact tape, proc-macro SAX deserialiser).
+- **AI usage disclosure** — GitHub Copilot assisted; assembly hand-authored.
+
+**Design decisions** — JOSS requires Pandoc Markdown, not raw LaTeX; the
+toolchain converts via ConTeXt to PDF.  Assembly listings are fenced code
+blocks (rendered as listings in the PDF).  Word count ~1496 including YAML
+front matter, well within the 750–1750 word target.
+
+**Results** — `doc/paper/paper.md` and `doc/paper/paper.bib` committed.
+
+**Commit** — 13e4b59 docs: first draft JOSS paper (paper.md + paper.bib)
