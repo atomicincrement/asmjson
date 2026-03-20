@@ -2459,3 +2459,52 @@ serde_json:          8066 records  |  combined: 24.1 ms  (34 MiB/s)
 ### Commit
 
 `16ce530` serde_example: combined MiB/s + serde_json comparison
+
+## Session — Repository moved to atomicincrement org
+
+### Move to atomicincrement GitHub organisation
+
+**What was done** — The repository was transferred from the personal
+`andy-thomason` GitHub account to the `atomicincrement` organisation.
+All in-repo references to the old URL were updated:
+
+- `Cargo.toml` `repository` field → `https://github.com/atomicincrement/asmjson`
+- `README.md` CI badge URL and LICENSE link → `atomicincrement/asmjson`
+
+**Design decisions** — Only canonical GitHub URLs embedded in source were
+changed; local filesystem paths (e.g. in this log) were left as-is since they
+reflect the machine's directory layout, not the remote.
+
+**Results** — No functional changes; purely metadata/URL updates.
+
+**Commit** — pending
+
+## Session — Fix CI failures (SIGILL + doctest arity)
+
+### Fix AVX-512 SIGILL in tests on GitHub Actions runners
+
+**What was done** — The CI was failing with `SIGILL: illegal instruction`
+because the `#[cfg(target_arch = "x86_64")]` zmm test helpers
+(`zmm_dom_matches`, `zmm_dom_rejects`, `zmm_sax_matches`) and the
+`zmm_dom_overflow_retry` test called AVX-512 assembly unconditionally.
+GitHub Actions `ubuntu-latest` runners do not have AVX-512 hardware.
+A runtime guard `if !is_x86_feature_detected!("avx512bw") { return; }` was
+added at the top of each of the four affected functions so they skip silently
+on non-AVX-512 machines instead of crashing with an illegal instruction.
+
+**Design decisions** — Early-return skipping (rather than `#[ignore]`) keeps
+the tests in the normal `cargo test` run and makes them self-activating on any
+AVX-512-capable machine.  The public API already used `is_x86_feature_detected`
+for dispatch; the tests now mirror that pattern.
+
+### Fix doctest arity for parse_to_dom
+
+**What was done** — Two code examples in `README.md` called
+`parse_to_dom(src)` with one argument, but the function signature changed to
+`parse_to_dom(src, initial_capacity: Option<usize>)` in a prior session.
+Both invocations were updated to `parse_to_dom(src, None)`.
+
+**Results** — All 29 unit tests and all 9 (+ 2 ignored) doctests pass locally
+and CI is expected to pass on `ubuntu-latest` (no AVX-512, zmm tests skip).
+
+**Commit** — pending (bump to 0.2.3)

@@ -1,12 +1,15 @@
 # asmjson
 
-[![CI](https://github.com/andy-thomason/asmjson/actions/workflows/ci.yml/badge.svg)](https://github.com/andy-thomason/asmjson/actions/workflows/ci.yml)
+[![CI](https://github.com/atomicincrement/asmjson/actions/workflows/ci.yml/badge.svg)](https://github.com/atomicincrement/asmjson/actions/workflows/ci.yml)
 [![crates.io](https://img.shields.io/crates/v/asmjson.svg)](https://crates.io/crates/asmjson)
 [![docs.rs](https://docs.rs/asmjson/badge.svg)](https://docs.rs/asmjson)
 
-A fast JSON parser that classifies 64 bytes at a time using SIMD or portable
-SWAR (SIMD-Within-A-Register) bit tricks, enabling entire whitespace runs and
-string bodies to be skipped in a single operation.
+A JSON parser that reaches **10.93 GiB/s** single-threaded and **26.6 GiB/s**
+across Rayon tasks on an AVX-512BW CPU — roughly **1.6× faster than sonic-rs**
+on string-heavy workloads.  It classifies 64 bytes at a time using hand-written
+AVX-512BW assembly or portable SWAR (SIMD-Within-A-Register) bit tricks,
+enabling entire whitespace runs and string bodies to be skipped in a single
+operation.
 
 > **⚠️ Experimental — not production ready.**  
 > This crate is a research and benchmarking project.  The API is unstable, test
@@ -135,7 +138,7 @@ keep the values you care about:
 use asmjson::{parse_to_dom, JsonRef, DomRef};
 
 let src = r#"{"items":[1,2,3],"meta":{"count":3}}"#;
-let tape = parse_to_dom(src).unwrap();
+let tape = parse_to_dom(src, None).unwrap();
 let root = tape.root().unwrap();
 
 // Single pass — O(n_keys) regardless of how many fields we need.
@@ -164,7 +167,7 @@ further passes at zero additional parsing cost:
 use asmjson::{parse_to_dom, JsonRef, DomRef};
 
 let src = r#"[{"name":"Alice","score":91},{"name":"Bob","score":78},{"name":"Carol","score":85}]"#;
-let tape = parse_to_dom(src).unwrap();
+let tape = parse_to_dom(src, None).unwrap();
 let root = tape.root().unwrap();
 
 // Collect once — O(n) scan.
@@ -220,7 +223,7 @@ string whose raw byte span contains a byte `< 0x20`.
 
 ## License
 
-MIT — see [LICENSE](https://github.com/andy-thomason/asmjson/blob/master/LICENSE).
+MIT — see [LICENSE](https://github.com/atomicincrement/asmjson/blob/master/LICENSE).
 
 For internals documentation (state machine annotation, register allocation,
 design decisions) see [doc/dev.md](doc/dev.md).

@@ -1279,6 +1279,9 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     fn zmm_dom_matches(src: &str) {
+        if !is_x86_feature_detected!("avx512bw") {
+            return;
+        }
         let ref_tape =
             parse_to_dom(src, None).unwrap_or_else(|| panic!("reference rejected: {src:?}"));
         let asm_tape = unsafe { parse_to_dom_zmm(src, None) }
@@ -1291,6 +1294,9 @@ mod tests {
 
     #[cfg(target_arch = "x86_64")]
     fn zmm_dom_rejects(src: &str) {
+        if !is_x86_feature_detected!("avx512bw") {
+            return;
+        }
         assert!(
             unsafe { parse_to_dom_zmm(src, None) }.is_none(),
             "zmm_tape should reject {src:?}"
@@ -1468,6 +1474,9 @@ mod tests {
             }
         }
 
+        if !is_x86_feature_detected!("avx512bw") {
+            return;
+        }
         let ref_log = parse_with(src, EventLog::default())
             .unwrap_or_else(|| panic!("reference rejected: {src:?}"));
         let asm_log = unsafe { parse_with_zmm(src, EventLog::default()) }
@@ -1519,6 +1528,9 @@ mod tests {
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn zmm_dom_overflow_retry() {
+        if !is_x86_feature_detected!("avx512bw") {
+            return;
+        }
         // A 200-element array of objects produces ~800+ tape entries.
         // Initial capacity is src.len()/4 which is far smaller, so the
         // function must handle at least one TapeOverflow retry automatically.
