@@ -221,6 +221,12 @@ values.  If your use-case requires this check it can be performed as an extra
 pass over the raw string bytes after parsing — for example, rejecting any
 string whose raw byte span contains a byte `< 0x20`.
 
+## Contributing
+
+Bug reports, correctness fixes, and performance improvements are welcome.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for how to report issues, submit
+patches, and seek support.
+
 ## License
 
 MIT — see [LICENSE](https://github.com/atomicincrement/asmjson/blob/master/LICENSE).
