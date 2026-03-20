@@ -2538,3 +2538,31 @@ front matter, well within the 750–1750 word target.
 **Results** — `doc/paper/paper.md` and `doc/paper/paper.bib` committed.
 
 **Commit** — 13e4b59 docs: first draft JOSS paper (paper.md + paper.bib)
+
+## Session — JOSS paper iterations and 0.2.4 release
+
+### Paper pre-flight fixes
+
+**What was done** — Several pre-flight issues in `doc/paper/paper.md` were
+identified and corrected:
+
+- ORCID `0000-0001-8240-1614` added to author metadata.
+- Typo "instumental" → "instrumental" fixed in AI Usage Disclosure section.
+- Missing citations added: `[@serde-json]` on first mention of `serde_json`;
+  `[@rayon]` on first mention of Rayon parallel tasks.
+- SWAR section heading expanded to "Portable SWAR (SIMD-Within-A-Register) fallback".
+- `CONTRIBUTING.md` created with issue reporting, patch submission, assembly
+  conventions, and support guidance; a "Contributing" section added to README
+  pointing to it (required by JOSS reviewer checklist).
+- `doc/paper/JOSS_checklist.md` created capturing the pre-flight status table
+  and the official JOSS reviewer checklist items as a reference.
+
+**Design decisions** — The `# References` heading in the paper is a Pandoc
+placeholder; no manual entries are needed there. All six `[@key]` citations in
+the paper have matching entries in `paper.bib`; `json-rfc` in the bib is
+unused but harmless.
+
+**Results** — Prose word count 1501 (JOSS limit 1750). All required sections
+and metadata present. All citation keys resolve.
+
+**Commit** — bump to 0.2.4 (b4478be), Cargo.lock (8012cdf)
