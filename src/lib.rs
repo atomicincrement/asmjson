@@ -1590,69 +1590,49 @@ mod tests {
         assert_eq!(dom.root().as_str(), Some("=\\\"#"));
     }
 
-    /// Collect every raw JSON string token (including surrounding quotes) from
-    /// `src` that contains at least one `\\` escape sequence (two consecutive
-    /// backslash characters in the raw source).
-    fn json_strings_with_double_backslash(src: &str) -> Vec<&str> {
-        let bytes = src.as_bytes();
-        let mut result = Vec::new();
-        let mut i = 0;
-        while i < bytes.len() {
-            if bytes[i] == b'"' {
-                let start = i;
-                i += 1;
-                let mut in_escape = false;
-                let mut has_double_bs = false;
-                loop {
-                    if i >= bytes.len() {
-                        break;
-                    }
-                    let b = bytes[i];
-                    if in_escape {
-                        if b == b'\\' {
-                            has_double_bs = true;
-                        }
-                        in_escape = false;
-                    } else if b == b'\\' {
-                        in_escape = true;
-                    } else if b == b'"' {
-                        if has_double_bs {
-                            result.push(&src[start..=i]);
-                        }
-                        i += 1;
-                        break;
-                    }
-                    i += 1;
-                }
-            } else {
-                i += 1;
-            }
-        }
-        result
-    }
-
+    /// SAX-path regression for the same `eq_byte` false-positive bug.
+    ///
+    /// Uses `parse_with` to drive a minimal [`Sax`] writer and confirms that
+    /// the events emitted for each of the three formerly-failing inputs carry
+    /// the correct raw (still-escaped) string content.
     #[test]
-    fn dom_parse_double_backslash_strings() {
-        let path = "/home/amy/atomicincrement/llm-play-2/models/Qwen2.5-0.5B/tokenizer.json";
-        let src =
-            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
-        let tokens = json_strings_with_double_backslash(&src);
-        assert!(
-            !tokens.is_empty(),
-            "expected to find double-backslash strings in {path}"
-        );
-        let mut failures: Vec<&str> = Vec::new();
-        for token in &tokens {
-            if parse_to_dom(token, None).is_none() {
-                failures.push(token);
+    fn swar_eq_byte_quote_false_positive_regression_sax() {
+        struct Capture(Option<String>);
+
+        impl<'s> Sax<'s> for Capture {
+            type Output = String;
+
+            fn null(&mut self) {}
+            fn bool_val(&mut self, _: bool) {}
+            fn number(&mut self, _: &str) {}
+            fn string(&mut self, s: &str) {
+                self.0 = Some(s.to_owned());
+            }
+            fn escaped_string(&mut self, s: &str) {
+                self.0 = Some(s.to_owned());
+            }
+            fn key(&mut self, _: &str) {}
+            fn escaped_key(&mut self, _: &str) {}
+            fn start_object(&mut self) {}
+            fn end_object(&mut self) {}
+            fn start_array(&mut self) {}
+            fn end_array(&mut self) {}
+            fn finish(self) -> Option<String> {
+                self.0
             }
         }
-        if !failures.is_empty() {
-            let sample: Vec<_> = failures.iter().take(5).collect();
-            panic!(
-                "parse_to_dom failed on {} token(s); first few: {sample:#?}",
-                failures.len()
-            );
+
+        // Each tuple: (raw JSON input, expected raw content between the quotes)
+        let cases: &[(&str, &str)] = &[
+            ("\"#\\\\\"", "#\\\\"),
+            ("\"# \\\\\"", "# \\\\"),
+            ("\"=\\\\\\\"#\"", "=\\\\\\\"#"),
+        ];
+
+        for &(src, expected_raw) in cases {
+            let got = parse_with(src, Capture(None))
+                .unwrap_or_else(|| panic!("parse_with rejected {src:?}"));
+            assert_eq!(got, expected_raw, "SAX raw string mismatch for {src:?}");
         }
     }
 }
