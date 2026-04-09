@@ -1602,21 +1602,14 @@ mod tests {
         impl<'s> Sax<'s> for Capture {
             type Output = String;
 
-            fn null(&mut self) {}
-            fn bool_val(&mut self, _: bool) {}
-            fn number(&mut self, _: &str) {}
             fn string(&mut self, s: &str) {
                 self.0 = Some(s.to_owned());
             }
+
             fn escaped_string(&mut self, s: &str) {
                 self.0 = Some(s.to_owned());
             }
-            fn key(&mut self, _: &str) {}
-            fn escaped_key(&mut self, _: &str) {}
-            fn start_object(&mut self) {}
-            fn end_object(&mut self) {}
-            fn start_array(&mut self) {}
-            fn end_array(&mut self) {}
+
             fn finish(self) -> Option<String> {
                 self.0
             }
