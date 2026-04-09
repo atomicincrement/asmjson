@@ -1205,8 +1205,12 @@ pub struct ByteState {
 ///   bytes ≥ 0x80 (not whitespace).  Invert and mask to get the flag.
 ///
 /// * **Byte equality**: XOR the word with a broadcast of the target byte
-///   (`b * 0x0101_0101_0101_0101`), then test for a zero byte via
-///   `(v − 0x0101…) & ∼v & 0x8080…`.
+///   (`b * 0x0101_0101_0101_0101`), leaving zero in every matching byte.
+///   Detect zeros with the carry-free formula
+///   `!( ((x & 0x7f…) + 0x7f…) | x ) & 0x8080…`, which avoids the false
+///   positives of the classic `(v−0x01…) & ∼v & 0x80…` trick (that trick
+///   flags a byte with value 0x01 when the immediately preceding byte is
+///   zero, causing a spurious `"` detection for e.g. `"#`).
 ///
 /// * **Movemask**: collect the MSB of each byte into the low 8 bits by
 ///   multiplying `(v & 0x8080…)` by `0x0002_0408_1020_4081` and taking the
@@ -1216,15 +1220,19 @@ fn classify_u64(src: &[u8]) -> ByteState {
     let mut buf = [0u8; 64];
     buf[..src.len()].copy_from_slice(src);
 
-    #[inline(always)]
-    fn has_zero_byte(v: u64) -> u64 {
-        v.wrapping_sub(0x0101_0101_0101_0101_u64) & !v & 0x8080_8080_8080_8080_u64
-    }
-
     /// Produce a u64 with bit 7 of each byte set where that byte equals `b`.
+    ///
+    /// Uses a carry-free formula that has no false positives, unlike the
+    /// classic `(v - 0x01…) & !v & 0x80…` trick which falsely flags a byte
+    /// with value 0x01 when the preceding byte is zero.
     #[inline(always)]
     fn eq_byte(v: u64, b: u8) -> u64 {
-        has_zero_byte(v ^ (b as u64 * 0x0101_0101_0101_0101_u64))
+        let x = v ^ (b as u64 * 0x0101_0101_0101_0101_u64);
+        // (x & 0x7f…) + 0x7f… sets bit 7 iff the low-7 bits of x are non-zero;
+        // OR-ing with x itself propagates bit 7 if the byte was 0x80.
+        // Inverting and masking gives bit 7 set exactly where x == 0.
+        !(((x & 0x7f7f_7f7f_7f7f_7f7f_u64).wrapping_add(0x7f7f_7f7f_7f7f_7f7f_u64)) | x)
+            & 0x8080_8080_8080_8080_u64
     }
 
     /// Collect the MSB of each byte into the low 8 bits.
@@ -1550,5 +1558,84 @@ mod tests {
         let tape =
             unsafe { parse_to_dom_zmm(&big, Some(4)) }.expect("overflow retry should succeed");
         assert_eq!(tape.root().unwrap().array_iter().unwrap().count(), 200);
+    }
+
+    #[test]
+    fn dom_parse_tokenizer_json() {
+        let path = "/home/amy/atomicincrement/llm-play-2/models/Qwen2.5-0.5B/tokenizer.json";
+        let src =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let dom = parse_to_dom(&src, None)
+            .unwrap_or_else(|| panic!("parse_to_dom failed to parse {path}"));
+        assert!(
+            dom.root().map(|r| r.is_object()).unwrap_or(false),
+            "expected top-level object in {path}"
+        );
+    }
+
+    /// Collect every raw JSON string token (including surrounding quotes) from
+    /// `src` that contains at least one `\\` escape sequence (two consecutive
+    /// backslash characters in the raw source).
+    fn json_strings_with_double_backslash(src: &str) -> Vec<&str> {
+        let bytes = src.as_bytes();
+        let mut result = Vec::new();
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i] == b'"' {
+                let start = i;
+                i += 1;
+                let mut in_escape = false;
+                let mut has_double_bs = false;
+                loop {
+                    if i >= bytes.len() {
+                        break;
+                    }
+                    let b = bytes[i];
+                    if in_escape {
+                        if b == b'\\' {
+                            has_double_bs = true;
+                        }
+                        in_escape = false;
+                    } else if b == b'\\' {
+                        in_escape = true;
+                    } else if b == b'"' {
+                        if has_double_bs {
+                            result.push(&src[start..=i]);
+                        }
+                        i += 1;
+                        break;
+                    }
+                    i += 1;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        result
+    }
+
+    #[test]
+    fn dom_parse_double_backslash_strings() {
+        let path = "/home/amy/atomicincrement/llm-play-2/models/Qwen2.5-0.5B/tokenizer.json";
+        let src =
+            std::fs::read_to_string(path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"));
+        let tokens = json_strings_with_double_backslash(&src);
+        assert!(
+            !tokens.is_empty(),
+            "expected to find double-backslash strings in {path}"
+        );
+        let mut failures: Vec<&str> = Vec::new();
+        for token in &tokens {
+            if parse_to_dom(token, None).is_none() {
+                failures.push(token);
+            }
+        }
+        if !failures.is_empty() {
+            let sample: Vec<_> = failures.iter().take(5).collect();
+            panic!(
+                "parse_to_dom failed on {} token(s); first few: {sample:#?}",
+                failures.len()
+            );
+        }
     }
 }
